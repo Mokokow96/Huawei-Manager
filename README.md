@@ -41,8 +41,8 @@ Sebagai catatan: **latar belakang saya sebenarnya adalah seorang 3D Animator, bu
 
 ### 📱 Kompatibilitas Sistem
 
-* ✅ **Sudah Diuji:** Android 16
-* ⚠️ **Android 15 ke bawah:** Belum pernah dicoba. Jika Anda mencobanya di versi Android yang lebih lama dan menemukan kendala, laporan atau masukan (*issue*) sangat dipersilakan!
+* ✅ **Android 7.0 (API 24) sampai Android 16** didukung.
+* ℹ️ Jika menemui kendala di versi Android tertentu, laporan (*issue*) sangat dipersilakan!
 
 ---
 

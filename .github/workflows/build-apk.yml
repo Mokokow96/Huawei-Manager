@@ -20,22 +20,14 @@ jobs:
         with:
           gradle-version: 9.3.1
 
-      - name: Siapkan debug.keystore
-        env:
-          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
-        run: |
-          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
-            echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > debug.keystore
-          else
-            keytool -genkeypair -keystore debug.keystore -storepass android -keypass android \
-              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
-
-      - name: Build APK debug
-        run: gradle assembleDebug --no-daemon
+      # Keystore tetap ada di repo (keystore/huawei-manager.jks), jadi tanda tangan
+      # APK selalu sama di setiap build dan bisa di-update tanpa uninstall.
+      - name: Build APK debug & release
+        run: gradle assembleDebug assembleRelease --no-daemon
 
       - uses: actions/upload-artifact@v4
         with:
-          name: huawei-management-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: huawei-manager-apk
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk

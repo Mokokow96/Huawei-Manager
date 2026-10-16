@@ -1,6 +1,0 @@
-{
-  "name": "Sinyal E5372",
-  "description": "Aplikasi manajemen modem Huawei E5372 (MiFi) untuk pelacak sinyal presisi (SINR, RSSI, PCI), ganti IP, pengunci band LTE Indonesia, dan pemantau kuota.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

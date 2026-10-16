@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Sinyal E5372"
+rootProject.name = "Huawei Manager"
 
 include(":app")
