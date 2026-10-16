@@ -1,26 +1,57 @@
 # 📡 Huawei Manager E5372
 
-> A clean, lightweight, and 100% free alternative to bloated, ad-riddled Huawei modem management tools.
+> Aplikasi pengelola modem Huawei yang bersih, ringan, dan 100% gratis tanpa iklan maupun langganan berbayar.
 
 ---
 
-### 💡 Why This Exists
+### 💡 Latar Belakang
 
-Let’s be honest: managing a portable Huawei modem shouldn't cost a monthly subscription, nor should it require dodging full-screen ads just to check your signal strength or switch bands. 
+Mengelola modem portabel Huawei seharusnya tidak perlu membayar biaya langganan bulanan, apalagi harus terganggu oleh iklan *full-screen* hanya untuk sekadar mengecek sinyal atau mengganti frekuensi (band).
 
-Frustrated by the lack of simple, clean tools, I decided to build my own. 
+Karena jenuh dengan banyaknya aplikasi alternatif yang berbayar dan penuh iklan, saya memutuskan untuk membuat aplikasi ini sendiri.
 
-Here is the catch: **I'm actually a 3D Animator, not a traditional software developer.** With sheer persistence, a clear idea of what users actually need, and the power of modern **AI**, this project was brought to life. 
-
-It does what it needs to do—nothing more, nothing less.
+Sebagai catatan: **latar belakang saya sebenarnya adalah seorang 3D Animator, bukan programmer profesional.** Namun, berbekal kebutuhan nyata dan bantuan teknologi **AI**, aplikasi yang bersih, ringan, dan fungsional ini berhasil terwujud.
 
 ---
 
-### ✨ Highlights
+### ✨ Fitur Utama
 
-* **🚫 Completely Ad-Free:** No banners, no pop-ups, no tracking.
-* **🔓 100% Free & Open:** No subscriptions or paywalled core features.
-* **⚡ Lightweight & Fast:** Straightforward interface designed for essential modem controls.
-* **🎨 Built by an Artist + AI:** Crafting practical tools doesn't belong only to senior devs anymore.
+#### 📶 Pemantauan Sinyal Real-Time (Telemetri)
+* **Grafik Riwayat SINR Real-Time:** Memantau pergerakan kualitas sinyal (SINR) secara langsung dengan grafik riwayat—sangat berguna saat mencari posisi terbaik atau mengarahkan antena eksternal.
+* **Informasi BTS (PCI):** Menampilkan kode **PCI (Physical Cell ID)** pemancar/menara BTS yang sedang terhubung.
+* **Metrik Sinyal Akurat:**
+  * **RSRP** (Daya kekuatan sinyal yang diterima)
+  * **RSRQ** (Kualitas sinyal yang diterima)
+  * **RSSI** (Indikator kekuatan sinyal keseluruhan)
+  * **SINR** (Rasio sinyal terhadap gangguan/noise)
+
+#### 🎛️ Kontrol Jaringan & Frekuensi
+* **Pilihan / Kunci Band (Band Lock):** Kunci frekuensi LTE tertentu sesuai kebutuhan untuk koneksi yang lebih stabil dan cepat.
+* **Ganti IP Cepat:** Fitur *reconnect* instan untuk memperbarui atau mendapatkan alamat IP publik baru secara otomatis.
+
+#### 🛡️ Manajemen Perangkat Terhubung
+* **Daftar Perangkat Aktif:** Melihat daftar perangkat yang sedang terhubung ke jaringan Wi-Fi modem.
+* **Ban & Unban Perangkat:** Blokir (ban) atau izinkan kembali (unban) perangkat yang tidak diinginkan hanya dengan satu klik.
+
+#### 📊 Kuota & Kontrol Sistem
+* **Atur Batas Kuota Bulanan:** Pantau pemakaian data dan tentukan batas limit bulanan agar kuota tidak jebol.
+* **Restart Modem:** Nyalakan ulang modem langsung dari aplikasi tanpa perlu menekan tombol fisik atau membuka web UI yang lambat.
 
 ---
+
+### 📱 Kompatibilitas Sistem
+
+* ✅ **Sudah Diuji:** Android 16
+* ⚠️ **Android 15 ke bawah:** Belum pernah dicoba. Jika Anda mencobanya di versi Android yang lebih lama dan menemukan kendala, laporan atau masukan (*issue*) sangat dipersilakan!
+
+---
+
+### 🚫 Bebas Iklan & Terbuka
+* **Tanpa Iklan:** Tidak ada banner, pop-up, ataupun pelacak data.
+* **100% Gratis:** Tidak ada sistem langganan atau fitur yang dikunci/berbayar.
+* **Ringan & Cepat:** Berjalan lancar tanpa fitur mubazir.
+
+---
+
+### 🤝 Masukan & Kontribusi
+Karena proyek ini
