@@ -1,8 +1,6 @@
 <resources>
-    <string name="app_name">Sinyal E5372</string>
-    <string name="modem_model">Huawei E5372</string>
-    <string name="firmware_ver">21.290.23.00.00 (Mod)</string>
-    <string name="login_title">Koneksi Modem E5372</string>
+    <string name="app_name">Huawei Management</string>
+    <string name="login_title">Koneksi Modem Huawei</string>
     <string name="login_subtitle">Hubungkan ke WebUI Huawei HiLink</string>
     <string name="ip_gateway">IP Gateway Modem</string>
     <string name="username">Username</string>

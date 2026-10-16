@@ -143,7 +143,7 @@ fun IpChangeDialog(
                             )
                         )
                         Text(
-                            text = "Mengirim sinyal switch off ke modem E5372",
+                            text = "Mengirim sinyal switch off ke modem",
                             style = MaterialTheme.typography.bodySmall.copy(
                                 color = TextSecondary
                             )

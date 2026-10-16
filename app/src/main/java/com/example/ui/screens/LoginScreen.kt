@@ -83,6 +83,13 @@ fun LoginScreen(
     val savedPass by viewModel.savedPassword.collectAsState()
     val isConnecting by viewModel.isConnecting.collectAsState()
     val errorMessage by viewModel.connectionErrorMessage.collectAsState()
+    val modemPreview by viewModel.modemPreview.collectAsState()
+
+    // Baca model & firmware asli dari modem setiap alamat gateway berubah
+    androidx.compose.runtime.LaunchedEffect(gatewayIp) {
+        kotlinx.coroutines.delay(400)
+        viewModel.refreshModemPreview()
+    }
 
     var username by remember(savedUser) { mutableStateOf(savedUser) }
     var password by remember(savedPass) { mutableStateOf(savedPass) }
@@ -112,29 +119,14 @@ fun LoginScreen(
         ) {
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Hero Badge
-            Box(
+            // Hero logo (ikon aplikasi dari file referensi)
+            androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.ic_app_logo),
+                contentDescription = "Huawei Management",
                 modifier = Modifier
-                    .size(76.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(
-                                ElectricBlue.copy(alpha = 0.25f),
-                                Color.Transparent
-                            )
-                        )
-                    )
-                    .border(2.dp, ElectricBlue.copy(alpha = 0.6f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Router,
-                    contentDescription = "Modem",
-                    tint = ElectricBlue,
-                    modifier = Modifier.size(38.dp)
-                )
-            }
+                    .size(84.dp)
+                    .clip(RoundedCornerShape(20.dp))
+            )
 
             Spacer(modifier = Modifier.height(14.dp))
 
@@ -159,7 +151,11 @@ fun LoginScreen(
                         .padding(horizontal = 8.dp, vertical = 3.dp)
                 ) {
                     Text(
-                        text = "FIRMWARE 21.290.23.00.00 (MOD UNLOCK)",
+                        text = run {
+                            val (model, fw) = modemPreview
+                            val fwText = if (fw.isNotBlank()) "Firmware $fw" else "Firmware terdeteksi otomatis setelah login"
+                            if (model.isNotBlank()) "$model • $fwText" else fwText
+                        },
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = SignalGreen
@@ -211,7 +207,7 @@ fun LoginScreen(
                                 )
                             )
                             Text(
-                                text = "1. Pastikan HP sudah tersambung ke Wi-Fi modem E5372.\n2. Cek apakah IP gateway WebUI modem kamu 192.168.8.1.",
+                                text = "1. Pastikan HP sudah tersambung ke Wi-Fi modem Huawei.\n2. Cek apakah IP gateway WebUI modem kamu 192.168.8.1.",
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     color = TextSecondary,
                                     fontSize = 10.sp,

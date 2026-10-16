@@ -15,6 +15,34 @@ enum class ConnectionState {
     ERROR
 }
 
+/** Status koneksi HP -> MiFi saat dashboard sedang dibuka. */
+enum class LinkState {
+    /** Terhubung dan data realtime mengalir. */
+    ONLINE,
+    /** MiFi tidak terjangkau; aplikasi mencoba menyambung ulang otomatis (maks. 10x / 5 menit). */
+    OFFLINE_RETRYING,
+    /** 10 percobaan gagal; menunggu pengguna menekan tombol refresh manual. */
+    OFFLINE_GAVE_UP
+}
+
+/** Perangkat yang sedang terhubung ke Wi-Fi MiFi. */
+data class ConnectedDevice(
+    val mac: String,
+    val ip: String,
+    val name: String,
+    /** Perkiraan waktu (epoch ms) perangkat mulai terhubung. 0 jika tidak diketahui. */
+    val connectedSinceMs: Long,
+    /** Lama terhubung dalam detik. 0 jika tidak diketahui. */
+    val connectedSeconds: Long,
+    val isThisPhone: Boolean = false
+)
+
+/** Perangkat yang masuk daftar blokir (MAC filter) di modem. */
+data class BlockedDevice(
+    val mac: String,
+    val name: String
+)
+
 data class SignalData(
     val sinr: Float = 0f,             // in dB
     val rssi: Int = -90,              // in dBm (-51 to -113)
@@ -108,8 +136,8 @@ data class NetworkStatus(
     val connectionState: ConnectionState = ConnectionState.CONNECTED,
     val batteryPercent: Int = 88,
     val wifiUsers: Int = 3,
-    val deviceModel: String = "Huawei E5372",
-    val firmwareVersion: String = "21.290.23.00.00 (Mod)",
+    val deviceModel: String = "",
+    val firmwareVersion: String = "",
     val isDemoMode: Boolean = true
 )
 

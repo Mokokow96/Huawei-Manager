@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -28,6 +29,10 @@ import com.example.viewmodel.AppScreen
 import com.example.viewmodel.ModemViewModel
 
 class MainActivity : ComponentActivity() {
+
+    // Instance yang sama dengan viewModel() di Compose (sama-sama terikat ke Activity ini)
+    private val modemViewModel: ModemViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -37,6 +42,18 @@ class MainActivity : ComponentActivity() {
                 MainAppNavHost(viewModel = viewModel)
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Aplikasi dibuka kembali: pulihkan sesi modem & mulai refresh realtime lagi
+        modemViewModel.onAppForegrounded()
+    }
+
+    override fun onStop() {
+        // Aplikasi masuk background: hentikan polling (hemat baterai, hindari sesi basi)
+        modemViewModel.onAppBackgrounded()
+        super.onStop()
     }
 }
 

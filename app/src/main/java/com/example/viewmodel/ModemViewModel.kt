@@ -4,6 +4,9 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.model.BandOption
+import com.example.model.BlockedDevice
+import com.example.model.ConnectedDevice
+import com.example.model.LinkState
 import com.example.model.ConnectionState
 import com.example.model.IpChangeProgress
 import com.example.model.NetworkStatus
@@ -32,6 +35,12 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         // Modem Huawei menghitung GB sebagai GiB (1024^3), sama dengan formatBytes() di Dashboard
         const val BYTES_PER_GB = 1024f * 1024f * 1024f
+
+        // Auto-retry saat MiFi offline: 10 percobaan x 30 detik = 5 menit
+        const val MAX_RETRY_ATTEMPTS = 10
+        const val RETRY_INTERVAL_SECONDS = 30
+        const val FAILED_ROUNDS_BEFORE_OFFLINE = 3
+        const val DEVICE_REFRESH_EVERY_ROUNDS = 4
     }
 
     private val modemService = HilinkModemService()
@@ -110,8 +119,50 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
     private val _sinrHistory = MutableStateFlow<List<Float>>(emptyList())
     val sinrHistory: StateFlow<List<Float>> = _sinrHistory.asStateFlow()
 
+    // Status koneksi HP -> MiFi (Terhubung / Offline) + auto-retry
+    private val _linkState = MutableStateFlow(LinkState.ONLINE)
+    val linkState: StateFlow<LinkState> = _linkState.asStateFlow()
+
+    private val _offlineAttempt = MutableStateFlow(0)
+    val offlineAttempt: StateFlow<Int> = _offlineAttempt.asStateFlow()
+
+    private val _secondsToNextRetry = MutableStateFlow(0)
+    val secondsToNextRetry: StateFlow<Int> = _secondsToNextRetry.asStateFlow()
+
+    // Model & firmware modem untuk halaman login (dibaca dari modem, atau cache login terakhir)
+    private val _modemPreview = MutableStateFlow(Pair(prefs.lastModel, prefs.lastFirmware))
+    val modemPreview: StateFlow<Pair<String, String>> = _modemPreview.asStateFlow()
+
+    // Alasan daftar perangkat gagal dibaca (null = tidak ada masalah)
+    private val _deviceListError = MutableStateFlow<String?>(null)
+    val deviceListError: StateFlow<String?> = _deviceListError.asStateFlow()
+
+    // Perangkat terhubung & diblokir
+    private val _connectedDevices = MutableStateFlow<List<ConnectedDevice>>(emptyList())
+    val connectedDevices: StateFlow<List<ConnectedDevice>> = _connectedDevices.asStateFlow()
+
+    private val _blockedDevices = MutableStateFlow<List<BlockedDevice>>(emptyList())
+    val blockedDevices: StateFlow<List<BlockedDevice>> = _blockedDevices.asStateFlow()
+
+    private val _deviceBusyMac = MutableStateFlow<String?>(null)
+    val deviceBusyMac: StateFlow<String?> = _deviceBusyMac.asStateFlow()
+
+    private val _deviceMessage = MutableStateFlow<String?>(null)
+    val deviceMessage: StateFlow<String?> = _deviceMessage.asStateFlow()
+
+    // Data simulasi untuk Mode Demo
+    private val demoConnected = mutableListOf(
+        ConnectedDevice("AA:BB:CC:11:22:33", "192.168.8.101", "Galaxy-S23", 0L, 5_400L),
+        ConnectedDevice("AA:BB:CC:44:55:66", "192.168.8.102", "Laptop-Kantor", 0L, 1_260L),
+        ConnectedDevice("AA:BB:CC:77:88:99", "192.168.8.103", "Redmi-Note-12", 0L, 320L)
+    )
+    private val demoBlocked = mutableListOf<BlockedDevice>()
+
     private var pollingJob: Job? = null
+    private var reconnectJob: Job? = null
     private var consecutiveErrors = 0
+    private var pollingFast = false
+
 
     init {
         // Auto-login if user previously connected successfully
@@ -122,6 +173,22 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
                 pass = prefs.password,
                 isDemo = false
             )
+        }
+    }
+
+    /** Coba baca model & firmware modem langsung dari modem (tanpa login) untuk halaman login. */
+    fun refreshModemPreview() {
+        if (_isDemoMode.value) return
+        val ip = _gatewayIp.value
+        viewModelScope.launch {
+            wifiHelper.bindToWifiNetwork()
+            modemService.probeDeviceInfo(ip)?.let { (model, firmware) ->
+                val newModel = model.ifBlank { _modemPreview.value.first }
+                val newFw = firmware.ifBlank { _modemPreview.value.second }
+                _modemPreview.value = Pair(newModel, newFw)
+                if (newModel.isNotBlank()) prefs.lastModel = newModel
+                if (newFw.isNotBlank()) prefs.lastFirmware = newFw
+            }
         }
     }
 
@@ -149,9 +216,12 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
             if (isDemo) {
                 delay(500)
                 _isConnecting.value = false
+                _linkState.value = LinkState.ONLINE
                 _networkStatus.value = _networkStatus.value.copy(
                     gatewayIp = ip,
                     connectionState = ConnectionState.CONNECTED,
+                    deviceModel = "Huawei E5372",
+                    firmwareVersion = "Demo",
                     isDemoMode = true
                 )
                 _currentScreen.value = AppScreen.DASHBOARD
@@ -167,8 +237,13 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
 
             checkResult.onSuccess {
                 consecutiveErrors = 0
+                _linkState.value = LinkState.ONLINE
                 // Save credentials for seamless auto-login next time
                 prefs.saveCredentials(ip, user, pass)
+                // Simpan model & firmware asli hasil deteksi modem
+                modemService.getDeviceModel().takeIf { it.isNotBlank() }?.let { prefs.lastModel = it }
+                modemService.getFirmware().takeIf { it.isNotBlank() }?.let { prefs.lastFirmware = it }
+                _modemPreview.value = Pair(prefs.lastModel, prefs.lastFirmware)
 
                 // Read detected active band from modem
                 val activeBand = modemService.getCurrentlyDetectedBand()
@@ -182,13 +257,14 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
                 _currentScreen.value = AppScreen.DASHBOARD
 
                 fetchDataOnce()
+                refreshDevices()
                 startDataPolling()
             }.onFailure { error ->
                 _networkStatus.value = _networkStatus.value.copy(
                     connectionState = ConnectionState.ERROR
                 )
                 _connectionErrorMessage.value = error.message
-                    ?: "Gagal terhubung ke modem di $ip. Pastikan HP terhubung ke Wi-Fi modem E5372."
+                    ?: "Gagal terhubung ke modem di $ip. Pastikan HP terhubung ke Wi-Fi modem Huawei."
             }
         }
     }
@@ -226,6 +302,10 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
 
     fun disconnect() {
         pollingJob?.cancel()
+        reconnectJob?.cancel()
+        _linkState.value = LinkState.ONLINE
+        _connectedDevices.value = emptyList()
+        _blockedDevices.value = emptyList()
         prefs.clearAutoLogin()
         _currentScreen.value = AppScreen.LOGIN
         _networkStatus.value = _networkStatus.value.copy(
@@ -249,12 +329,15 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
     fun openSignalHunter() {
         _currentScreen.value = AppScreen.SIGNAL_HUNTER
         _sessionMaxSinr.value = _signalData.value.sinr
-        startDataPolling(fastMode = true)
+        pollingFast = true
+        // Saat offline, loop reconnect yang mengatur polling; jangan dimulai ganda
+        if (_linkState.value == LinkState.ONLINE) startDataPolling(fastMode = true)
     }
 
     fun closeSignalHunter() {
         _currentScreen.value = AppScreen.DASHBOARD
-        startDataPolling(fastMode = false)
+        pollingFast = false
+        if (_linkState.value == LinkState.ONLINE) startDataPolling(fastMode = false)
     }
 
     fun toggleAudioBeep(enabled: Boolean) {
@@ -343,15 +426,20 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun startDataPolling(fastMode: Boolean = false) {
+        pollingFast = fastMode
         pollingJob?.cancel()
         pollingJob = viewModelScope.launch {
+            var failedRounds = 0
+            var round = 0
             while (isActive) {
                 val ip = _gatewayIp.value
                 val demo = _isDemoMode.value
+                var roundOk = false
 
                 // 1. Fetch signal parameters
                 val signalResult = modemService.fetchSignalData(ip, demo)
                 signalResult.onSuccess { sig ->
+                    roundOk = true
                     consecutiveErrors = 0
                     _signalData.value = sig
 
@@ -370,20 +458,12 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
                     if (_audioBeepEnabled.value && _currentScreen.value == AppScreen.SIGNAL_HUNTER) {
                         beeper.playBeepForSinr(sig.sinr)
                     }
-                }.onFailure {
-                    if (!demo) {
-                        consecutiveErrors++
-                        if (consecutiveErrors >= 5) {
-                            _networkStatus.value = _networkStatus.value.copy(
-                                connectionState = ConnectionState.RECONNECTING
-                            )
-                        }
-                    }
                 }
 
                 // 2. Fetch traffic & network status
                 val trafficResult = modemService.fetchTrafficData(ip, demo)
                 trafficResult.onSuccess { tf ->
+                    roundOk = true
                     _trafficData.value = tf.copy(
                         monthQuotaLimitBytes = (_quotaLimitGb.value * BYTES_PER_GB).toLong(),
                         resetDayOfMonth = _resetDayOfMonth.value
@@ -392,7 +472,30 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
 
                 val netResult = modemService.fetchNetworkStatus(ip, demo)
                 netResult.onSuccess { st ->
+                    roundOk = true
                     _networkStatus.value = st
+                }
+
+                if (demo || roundOk) {
+                    failedRounds = 0
+                    if (_linkState.value != LinkState.ONLINE) _linkState.value = LinkState.ONLINE
+                } else {
+                    failedRounds++
+                    // Penyebab paling umum "angka berhenti bergerak": sesi/token modem kedaluwarsa.
+                    // Coba pulihkan sesi dulu sebelum menyatakan modem offline.
+                    if (modemService.refreshSession(ip)) {
+                        wifiHelper.bindToWifiNetwork()
+                        failedRounds = 0
+                    } else if (failedRounds >= FAILED_ROUNDS_BEFORE_OFFLINE) {
+                        goOffline()
+                        return@launch
+                    }
+                }
+
+                // 3. Perangkat terhubung/diblokir: lebih jarang daripada sinyal
+                round++
+                if (round % DEVICE_REFRESH_EVERY_ROUNDS == 1 && _currentScreen.value == AppScreen.DASHBOARD) {
+                    refreshDevices()
                 }
 
                 // 500ms in signal hunter for ultra-fast antenna adjustments, 1200ms in dashboard
@@ -402,9 +505,173 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ------------------------------------------------------------------------------------
+    // Offline + reconnect otomatis (10x percobaan, tiap 30 detik = 5 menit)
+    // ------------------------------------------------------------------------------------
+
+    private fun goOffline() {
+        pollingJob?.cancel()
+        _linkState.value = LinkState.OFFLINE_RETRYING
+        _networkStatus.value = _networkStatus.value.copy(connectionState = ConnectionState.RECONNECTING)
+        startReconnectLoop()
+    }
+
+    private fun startReconnectLoop() {
+        reconnectJob?.cancel()
+        reconnectJob = viewModelScope.launch {
+            _linkState.value = LinkState.OFFLINE_RETRYING
+            for (attempt in 1..MAX_RETRY_ATTEMPTS) {
+                _offlineAttempt.value = attempt
+                for (sec in RETRY_INTERVAL_SECONDS downTo 1) {
+                    _secondsToNextRetry.value = sec
+                    delay(1000)
+                }
+                _secondsToNextRetry.value = 0
+                if (tryReconnectOnce()) return@launch
+            }
+            // Semua percobaan gagal: tampilkan tombol refresh manual + background abu-abu
+            _linkState.value = LinkState.OFFLINE_GAVE_UP
+            _networkStatus.value = _networkStatus.value.copy(connectionState = ConnectionState.ERROR)
+        }
+    }
+
+    /** Satu kali percobaan menyambung ulang. True jika berhasil dan polling sudah dimulai lagi. */
+    private suspend fun tryReconnectOnce(): Boolean {
+        val ip = _gatewayIp.value
+        wifiHelper.bindToWifiNetwork()
+        val ok = modemService.refreshSession(ip)
+        if (!ok) return false
+        consecutiveErrors = 0
+        _linkState.value = LinkState.ONLINE
+        _offlineAttempt.value = 0
+        _networkStatus.value = _networkStatus.value.copy(connectionState = ConnectionState.CONNECTED)
+        fetchDataOnce()
+        refreshDevices()
+        startDataPolling(pollingFast)
+        return true
+    }
+
+    /** Tombol refresh manual (muncul setelah 10 percobaan gagal). */
+    fun manualRefresh() {
+        reconnectJob?.cancel()
+        _offlineAttempt.value = 0
+        _secondsToNextRetry.value = 0
+        _linkState.value = LinkState.OFFLINE_RETRYING
+        reconnectJob = viewModelScope.launch {
+            if (!tryReconnectOnce()) {
+                _linkState.value = LinkState.OFFLINE_GAVE_UP
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Siklus hidup aplikasi (background / foreground)
+    // ------------------------------------------------------------------------------------
+
+    /** Dipanggil saat aplikasi tidak lagi terlihat. Polling dihentikan agar hemat baterai. */
+    fun onAppBackgrounded() {
+        if (_currentScreen.value == AppScreen.LOGIN) return
+        pollingJob?.cancel()
+        reconnectJob?.cancel()
+    }
+
+    /**
+     * Dipanggil saat aplikasi dibuka kembali. Sesi modem biasanya sudah kedaluwarsa dan binding Wi-Fi
+     * bisa basi, jadi pulihkan keduanya lalu mulai polling dari awal supaya angka realtime bergerak lagi.
+     */
+    fun onAppForegrounded() {
+        if (_currentScreen.value == AppScreen.LOGIN) return
+
+        if (_isDemoMode.value) {
+            startDataPolling(pollingFast)
+            return
+        }
+
+        pollingJob?.cancel()
+        reconnectJob?.cancel()
+        viewModelScope.launch {
+            // Tampilkan angka lama dulu, lalu segarkan segera
+            if (tryReconnectOnce()) return@launch
+            // Belum terjangkau: masuk mode offline + retry otomatis
+            _linkState.value = LinkState.OFFLINE_RETRYING
+            _networkStatus.value = _networkStatus.value.copy(connectionState = ConnectionState.RECONNECTING)
+            startReconnectLoop()
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Perangkat terhubung & blokir
+    // ------------------------------------------------------------------------------------
+
+    private suspend fun refreshDevices() {
+        val ip = _gatewayIp.value
+        if (_isDemoMode.value) {
+            val now = System.currentTimeMillis()
+            for (i in demoConnected.indices) {
+                val d = demoConnected[i]
+                val secs = d.connectedSeconds + 5
+                demoConnected[i] = d.copy(connectedSeconds = secs, connectedSinceMs = now - secs * 1000L)
+            }
+            _deviceListError.value = null
+            _connectedDevices.value = demoConnected.toList()
+            _blockedDevices.value = demoBlocked.toList()
+            return
+        }
+        val localIp = wifiHelper.getLocalWifiIp()
+        modemService.fetchHostList(ip).onSuccess { list ->
+            _deviceListError.value = null
+            _connectedDevices.value = list.map { it.copy(isThisPhone = localIp != null && it.ip == localIp) }
+        }.onFailure { _deviceListError.value = it.message ?: "daftar perangkat tidak dapat dibaca" }
+        modemService.fetchBlockedDevices(ip).onSuccess { _blockedDevices.value = it }
+    }
+
+    fun blockDevice(device: ConnectedDevice) {
+        if (device.isThisPhone || _deviceBusyMac.value != null) return
+        _deviceBusyMac.value = device.mac
+        viewModelScope.launch {
+            val result = if (_isDemoMode.value) {
+                demoConnected.removeAll { it.mac == device.mac }
+                demoBlocked.add(BlockedDevice(device.mac, device.name))
+                Result.success(Unit)
+            } else {
+                modemService.blockDevice(_gatewayIp.value, device.mac, device.name)
+            }
+            result.onSuccess {
+                _connectedDevices.value = _connectedDevices.value.filterNot { it.mac == device.mac }
+                _deviceMessage.value = "${device.name} diblokir"
+            }.onFailure { _deviceMessage.value = it.message ?: "Gagal memblokir perangkat" }
+            refreshDevices()
+            _deviceBusyMac.value = null
+        }
+    }
+
+    fun unblockDevice(device: BlockedDevice) {
+        if (_deviceBusyMac.value != null) return
+        _deviceBusyMac.value = device.mac
+        viewModelScope.launch {
+            val result = if (_isDemoMode.value) {
+                demoBlocked.removeAll { it.mac == device.mac }
+                Result.success(Unit)
+            } else {
+                modemService.unblockDevice(_gatewayIp.value, device.mac)
+            }
+            result.onSuccess {
+                _blockedDevices.value = _blockedDevices.value.filterNot { it.mac == device.mac }
+                _deviceMessage.value = "${device.name} dibuka blokirnya"
+            }.onFailure { _deviceMessage.value = it.message ?: "Gagal membuka blokir" }
+            refreshDevices()
+            _deviceBusyMac.value = null
+        }
+    }
+
+    fun clearDeviceMessage() {
+        _deviceMessage.value = null
+    }
+
     override fun onCleared() {
         super.onCleared()
         pollingJob?.cancel()
+        reconnectJob?.cancel()
         beeper.release()
     }
 }

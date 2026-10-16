@@ -32,6 +32,14 @@ class PreferencesManager(context: Context) {
         get() = prefs.getInt(KEY_RESET_DAY, 1)
         set(value) = prefs.edit().putInt(KEY_RESET_DAY, value).apply()
 
+    var lastModel: String
+        get() = prefs.getString(KEY_LAST_MODEL, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_LAST_MODEL, value).apply()
+
+    var lastFirmware: String
+        get() = prefs.getString(KEY_LAST_FIRMWARE, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_LAST_FIRMWARE, value).apply()
+
     fun saveCredentials(ip: String, user: String, pass: String) {
         prefs.edit()
             .putString(KEY_GATEWAY_IP, ip)
@@ -46,6 +54,8 @@ class PreferencesManager(context: Context) {
     }
 
     companion object {
+        private const val KEY_LAST_MODEL = "last_model"
+        private const val KEY_LAST_FIRMWARE = "last_firmware"
         private const val KEY_GATEWAY_IP = "gateway_ip"
         private const val KEY_USERNAME = "username"
         private const val KEY_PASSWORD = "password"

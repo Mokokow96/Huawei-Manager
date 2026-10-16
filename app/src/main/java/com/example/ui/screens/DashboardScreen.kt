@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -55,6 +56,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,13 +67,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.model.BandOption
+import com.example.model.LinkState
+import com.example.ui.components.BlockedDevicesCard
+import com.example.ui.components.ConnectedDevicesCard
+import com.example.ui.components.OfflineBanner
 import com.example.ui.components.BandSelectorDialog
 import com.example.ui.components.DataLimitDialog
 import com.example.ui.components.IpChangeDialog
@@ -112,6 +121,28 @@ fun DashboardScreen(
     val quotaLimitGb by viewModel.quotaLimitGb.collectAsState()
     val resetDayOfMonth by viewModel.resetDayOfMonth.collectAsState()
 
+    val linkState by viewModel.linkState.collectAsState()
+    val offlineAttempt by viewModel.offlineAttempt.collectAsState()
+    val secondsToNextRetry by viewModel.secondsToNextRetry.collectAsState()
+    val connectedDevices by viewModel.connectedDevices.collectAsState()
+    val blockedDevices by viewModel.blockedDevices.collectAsState()
+    val deviceBusyMac by viewModel.deviceBusyMac.collectAsState()
+    val deviceMessage by viewModel.deviceMessage.collectAsState()
+    val deviceListError by viewModel.deviceListError.collectAsState()
+
+    val isOffline = !isDemoMode && linkState != LinkState.ONLINE
+    val gaveUp = !isDemoMode && linkState == LinkState.OFFLINE_GAVE_UP
+    val screenBackground = if (gaveUp) Color(0xFF3A3F47) else DarkNavyBase
+    val modemPreview by viewModel.modemPreview.collectAsState()
+    val modelTitle = networkStatus.deviceModel.ifBlank { modemPreview.first.ifBlank { "Huawei MiFi" } }
+
+    LaunchedEffect(deviceMessage) {
+        deviceMessage?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+            viewModel.clearDeviceMessage()
+        }
+    }
+
     var showMenu by remember { mutableStateOf(false) }
     var showRebootConfirmDialog by remember { mutableStateOf(false) }
 
@@ -120,7 +151,7 @@ fun DashboardScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(DarkNavyBase)
+            .background(screenBackground)
     ) {
         Column(
             modifier = Modifier
@@ -136,32 +167,21 @@ fun DashboardScreen(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_app_logo),
+                        contentDescription = "Huawei Management",
+                        contentScale = ContentScale.Fit,
                         modifier = Modifier
                             .size(44.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(
-                                Brush.linearGradient(
-                                    listOf(ElectricBlue.copy(alpha = 0.2f), Color.Transparent)
-                                )
-                            )
-                            .border(1.dp, ElectricBlue.copy(alpha = 0.5f), RoundedCornerShape(12.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Router,
-                            contentDescription = null,
-                            tint = ElectricBlue,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
+                    )
 
                     Spacer(modifier = Modifier.width(12.dp))
 
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = "Huawei E5372",
+                                text = modelTitle,
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.Bold,
                                     color = TextPrimary
@@ -183,24 +203,27 @@ fun DashboardScreen(
                                     )
                                 }
                             } else {
+                                val badgeColor = if (isOffline) WarningRed else SignalGreen
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(4.dp))
-                                        .background(SignalGreen.copy(alpha = 0.2f))
+                                        .background(badgeColor.copy(alpha = 0.2f))
                                         .padding(horizontal = 5.dp, vertical = 2.dp)
+                                        .testTag("link_status_badge")
                                 ) {
                                     Text(
-                                        text = "TERHUBUNG",
+                                        text = if (isOffline) "OFFLINE" else "TERHUBUNG",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = SignalGreen
+                                        color = badgeColor
                                     )
                                 }
                             }
                         }
                         Text(
-                            text = "Mod Firmware 21.290.23.00.00",
+                            text = networkStatus.firmwareVersion.ifBlank { modemPreview.second }
+                                .let { if (it.isBlank()) "Firmware —" else "Firmware $it" },
                             style = MaterialTheme.typography.bodySmall.copy(
                                 color = TextMuted,
                                 fontSize = 11.sp
@@ -270,6 +293,15 @@ fun DashboardScreen(
                     }
                 }
             }
+
+            // Banner status offline + auto retry / tombol refresh manual
+            OfflineBanner(
+                linkState = if (isDemoMode) LinkState.ONLINE else linkState,
+                attempt = offlineAttempt,
+                maxAttempts = 10,
+                secondsToNext = secondsToNextRetry,
+                onManualRefresh = { viewModel.manualRefresh() }
+            )
 
             // 1. Provider & Signal Strength (5 Bars) Card
             Card(
@@ -808,7 +840,7 @@ fun DashboardScreen(
                             )
                         )
                         Text(
-                            text = "Total lalu lintas data tercatat di modem E5372",
+                            text = "Total lalu lintas data tercatat di modem",
                             style = MaterialTheme.typography.bodySmall.copy(
                                 color = TextMuted,
                                 fontSize = 11.sp
@@ -992,6 +1024,22 @@ fun DashboardScreen(
                 }
             }
 
+            // 5b. Perangkat terhubung (nama, waktu terhubung, tombol blokir)
+            ConnectedDevicesCard(
+                devices = connectedDevices,
+                busyMac = deviceBusyMac,
+                onBlock = { viewModel.blockDevice(it) },
+                errorMessage = deviceListError,
+                reportedCount = networkStatus.wifiUsers
+            )
+
+            // 5c. Perangkat diblokir (dropdown buka/tutup, tombol unban)
+            BlockedDevicesCard(
+                devices = blockedDevices,
+                busyMac = deviceBusyMac,
+                onUnblock = { viewModel.unblockDevice(it) }
+            )
+
             // 6. Prominent "Pencari Sinyal" CTA Button
             Card(
                 modifier = Modifier
@@ -1093,7 +1141,7 @@ fun DashboardScreen(
         if (showRebootConfirmDialog) {
             AlertDialog(
                 onDismissRequest = { showRebootConfirmDialog = false },
-                title = { Text("Restart Modem Huawei E5372?", color = TextPrimary) },
+                title = { Text("Restart $modelTitle?", color = TextPrimary) },
                 text = {
                     Text(
                         "Modem akan mematikan dan menyalakan kembali sistem operasinya. Koneksi Wi-Fi akan terputus sementara selama 1-2 menit.",

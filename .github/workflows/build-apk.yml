@@ -37,5 +37,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sinyal-e5372-debug
+          name: huawei-management-debug
           path: app/build/outputs/apk/debug/*.apk

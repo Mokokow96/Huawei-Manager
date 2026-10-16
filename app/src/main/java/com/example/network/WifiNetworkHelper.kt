@@ -30,6 +30,8 @@ class WifiNetworkHelper(private val context: Context) {
                         return bound
                     }
                 }
+                // Tidak ada Wi-Fi aktif: lepas binding lama supaya tidak menempel ke jaringan yang sudah hilang
+                connectivityManager.bindProcessToNetwork(null)
             }
         } catch (e: Exception) {
             Log.e("WifiNetworkHelper", "Failed to bind to Wi-Fi", e)
@@ -52,5 +54,21 @@ class WifiNetworkHelper(private val context: Context) {
         } catch (e: Exception) {
             return false
         }
+    }
+
+    /** Alamat IPv4 HP pada jaringan Wi-Fi saat ini (untuk menandai "Perangkat ini" di daftar user). */
+    fun getLocalWifiIp(): String? {
+        try {
+            for (network in connectivityManager.allNetworks) {
+                val caps = connectivityManager.getNetworkCapabilities(network) ?: continue
+                if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+                val props = connectivityManager.getLinkProperties(network) ?: continue
+                val v4 = props.linkAddresses.firstOrNull { it.address is java.net.Inet4Address }
+                if (v4 != null) return v4.address.hostAddress
+            }
+        } catch (e: Exception) {
+            Log.w("WifiNetworkHelper", "Gagal membaca IP Wi-Fi lokal", e)
+        }
+        return null
     }
 }

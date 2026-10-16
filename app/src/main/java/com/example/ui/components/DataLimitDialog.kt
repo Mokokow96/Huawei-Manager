@@ -207,7 +207,7 @@ fun DataLimitDialog(
                 )
 
                 Text(
-                    text = "*Pengaturan ini akan dikirimkan ke modem Huawei E5372 dan tersimpan untuk pemantauan kuota akurat.",
+                    text = "*Pengaturan ini akan dikirimkan ke modem Huawei dan tersimpan untuk pemantauan kuota akurat.",
                     style = MaterialTheme.typography.labelSmall.copy(
                         color = TextMuted,
                         fontSize = 11.sp,

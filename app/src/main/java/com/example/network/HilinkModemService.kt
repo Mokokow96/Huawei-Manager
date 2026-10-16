@@ -3,6 +3,8 @@ package com.example.network
 import android.util.Base64
 import android.util.Log
 import com.example.model.BandOption
+import com.example.model.BlockedDevice
+import com.example.model.ConnectedDevice
 import com.example.model.ConnectionState
 import com.example.model.NetworkStatus
 import com.example.model.SignalData
@@ -51,9 +53,13 @@ class HilinkModemService {
     private var cachedToken: String? = null
     private var cachedSessionCookie: String? = null
 
+    // Kredensial terakhir yang dipakai login (untuk login ulang otomatis saat sesi kedaluwarsa)
+    private var lastUser: String = ""
+    private var lastPass: String = ""
+
     // Real device state
-    private var realDeviceModel: String = "Huawei E5372"
-    private var realFirmware: String = "21.290.23.00.00 (Mod)"
+    private var realDeviceModel: String = ""
+    private var realFirmware: String = ""
     private var realWanIp: String = ""
     private var detectedBand: BandOption = BandOption.INDONESIA_BANDS[0]
     private var detectedBandName: String = "Auto Band"
@@ -79,6 +85,16 @@ class HilinkModemService {
         password: String = ""
     ): Result<Boolean> = withContext(Dispatchers.IO) {
         try {
+            lastUser = username
+            lastPass = password
+            // Reset info perangkat supaya nama model dibaca ulang dari modem yang sedang terhubung
+            realDeviceModel = ""
+            realFirmware = ""
+            // Buang sesi lama: tanpa ini, sesi hasil login sebelumnya (password benar) masih dianggap
+            // valid oleh modem sehingga password yang salah tetap lolos.
+            cachedToken = null
+            cachedSessionCookie = null
+            cookieStore.clear()
             refreshToken(gatewayIp)
 
             val endpoints = listOf(
@@ -100,24 +116,43 @@ class HilinkModemService {
                 } catch (_: Exception) {}
             }
 
-            if (reachable) {
-                // Login hanya dicoba jika modem benar-benar menolak akses (error 125002/100003),
-                // supaya tidak memicu penguncian login akibat salah password berulang.
-                if (modemRequiresLogin(gatewayIp)) {
-                    loginToModem(gatewayIp, username, password)
-                }
-                // Initialize device info, operator, connected users, and active band
-                fetchDeviceInformation(gatewayIp)
-                fetchCurrentOperator(gatewayIp)
-                fetchConnectedWifiUsers(gatewayIp)
-                detectActiveBand(gatewayIp)
-                Result.success(true)
-            } else {
-                Result.failure(IOException("Modem di $gatewayIp tidak merespons."))
+            if (!reachable) {
+                return@withContext Result.failure(IOException("Modem di $gatewayIp tidak merespons."))
             }
+
+            // Verifikasi login. State-login 0 = modem tidak meminta login (sesi sudah terbuka).
+            val stateXml = try {
+                client.newCall(buildRequest("http://$gatewayIp/api/user/state-login").get().build())
+                    .execute().use { it.body?.string() }
+            } catch (_: Exception) { null }
+            val state = stateXml?.let { extractXmlTag(it, "State") }
+            val loginNeeded = when {
+                state == "0" -> false
+                state != null -> true
+                else -> modemRequiresLogin(gatewayIp)   // endpoint state-login tidak ada: tebak dari host-list
+            }
+
+            if (loginNeeded) {
+                when (attemptLogin(gatewayIp, username, password)) {
+                    LoginResult.OK -> Unit
+                    LoginResult.WRONG_CREDENTIALS ->
+                        return@withContext Result.failure(IOException("Username atau password salah."))
+                    LoginResult.LOCKED ->
+                        return@withContext Result.failure(IOException("Terlalu banyak percobaan login salah. Tunggu beberapa menit lalu coba lagi."))
+                    LoginResult.FAILED ->
+                        return@withContext Result.failure(IOException("Login ke modem gagal. Periksa koneksi Wi-Fi ke modem lalu coba lagi."))
+                }
+            }
+
+            // Initialize device info, operator, connected users, and active band
+            fetchDeviceInformation(gatewayIp)
+            fetchCurrentOperator(gatewayIp)
+            fetchConnectedWifiUsers(gatewayIp)
+            detectActiveBand(gatewayIp)
+            Result.success(true)
         } catch (e: Exception) {
             Log.e("HilinkService", "Check connection failed for $gatewayIp", e)
-            Result.failure(IOException("Gagal menghubungi modem di $gatewayIp. Pastikan HP terhubung ke Wi-Fi modem E5372."))
+            Result.failure(IOException("Gagal menghubungi modem di $gatewayIp. Pastikan HP terhubung ke Wi-Fi modem Huawei."))
         }
     }
 
@@ -147,19 +182,21 @@ class HilinkModemService {
         }
     }
 
+    private enum class LoginResult { OK, WRONG_CREDENTIALS, LOCKED, FAILED }
+
     /**
      * Login WebUI Huawei (password_type 4: base64(sha256(user + base64(sha256(pass)) + token))).
-     * Best-effort: kegagalan tidak mengubah perilaku endpoint yang memang terbuka.
+     * Hasil dibedakan supaya password salah benar-benar ditolak.
      */
-    private fun loginToModem(gatewayIp: String, user: String, pass: String): Boolean {
-        if (user.isBlank() || pass.isBlank()) return false
+    private fun attemptLogin(gatewayIp: String, user: String, pass: String): LoginResult {
+        if (user.isBlank() || pass.isBlank()) return LoginResult.WRONG_CREDENTIALS
         return try {
             refreshToken(gatewayIp)
-            val token = cachedToken ?: return false
+            val token = cachedToken ?: return LoginResult.FAILED
 
             val stateXml = client.newCall(buildRequest("http://$gatewayIp/api/user/state-login").get().build())
                 .execute().use { it.body?.string() }
-            if (stateXml != null && extractXmlTag(stateXml, "State") == "0") return true
+            if (stateXml != null && extractXmlTag(stateXml, "State") == "0") return LoginResult.OK
 
             val pwdType = stateXml?.let { extractXmlTag(it, "password_type") }?.toIntOrNull() ?: 4
             val encoded = if (pwdType == 4) {
@@ -167,21 +204,32 @@ class HilinkModemService {
             } else {
                 base64(pass)
             }
-            val xml = "<request><Username>$user</Username><Password>$encoded</Password>" +
+            val xml = "<request><Username>${xmlEscape(user)}</Username><Password>$encoded</Password>" +
                 "<password_type>$pwdType</password_type></request>"
 
-            val ok = client.newCall(
+            val body = client.newCall(
                 buildRequest("http://$gatewayIp/api/user/login").post(xml.toRequestBody(xmlMediaType)).build()
-            ).execute().use { r ->
-                r.isSuccessful && (r.body?.string()?.contains("<response>OK</response>") == true)
-            }
+            ).execute().use { it.body?.string() }
+
             // Token sesi berubah setelah login
             refreshToken(gatewayIp)
-            Log.d("HilinkService", "Login modem: $ok")
-            ok
+
+            if (body?.contains("<response>OK</response>") == true) {
+                Log.d("HilinkService", "Login modem: OK")
+                LoginResult.OK
+            } else {
+                val code = body?.let { extractXmlTag(it, "code") }
+                Log.w("HilinkService", "Login modem ditolak, kode=$code")
+                when (code) {
+                    "108001", "108002", "108006" -> LoginResult.WRONG_CREDENTIALS
+                    "108007", "108005" -> LoginResult.LOCKED
+                    "108003" -> LoginResult.OK   // user sudah login
+                    else -> LoginResult.FAILED
+                }
+            }
         } catch (e: Exception) {
             Log.w("HilinkService", "Login modem gagal: ${e.message}")
-            false
+            LoginResult.FAILED
         }
     }
 
@@ -378,6 +426,8 @@ class HilinkModemService {
                     connectionState = ConnectionState.CONNECTED,
                     batteryPercent = 86,
                     wifiUsers = 3,
+                    deviceModel = "Huawei E5372",
+                    firmwareVersion = "Demo",
                     isDemoMode = true
                 )
             )
@@ -409,6 +459,9 @@ class HilinkModemService {
 
                 // 3. WAN IP: inspect all endpoints so it's NEVER empty
                 val wanIp = fetchWanIp(gatewayIp)
+
+                // 4. Nama model dibaca otomatis dari modem (ulangi bila sebelumnya gagal terbaca)
+                if (realDeviceModel.isBlank()) fetchDeviceInformation(gatewayIp)
 
                 Result.success(
                     NetworkStatus(
@@ -642,18 +695,76 @@ class HilinkModemService {
 
     fun getCurrentlyDetectedBand(): BandOption = detectedBand
 
+    private val modelRegex = Regex("[A-Z]{1,2}\\d{3,4}[a-z]?(?:-\\d{2,3})?")
+
+    /**
+     * Cari model sebenarnya (mis. E5372, E5372s-32, B310s-22) dari beberapa field modem.
+     * Sebagian firmware mengisi DeviceName hanya "LTE", sedangkan tipe aslinya ada di HardwareVersion
+     * (mis. "CL1E5372SM01") atau ProductFamily.
+     */
+    private fun detectModelName(xml: String): String? {
+        for (tag in listOf("DeviceName", "devicename", "ProductFamily", "productfamily", "Classify", "classify", "HardwareVersion")) {
+            val v = extractXmlTag(xml, tag) ?: continue
+            modelRegex.find(v)?.let { return normalizeModelName(it.value) }
+        }
+        // Tidak ada yang cocok pola model: pakai DeviceName apa adanya bila bukan sekadar "LTE"/kosong
+        val raw = extractXmlTag(xml, "DeviceName") ?: extractXmlTag(xml, "devicename")
+        return raw?.trim()?.takeIf { it.isNotBlank() && !it.equals("LTE", true) }?.let { normalizeModelName(it) }
+    }
+
     private suspend fun fetchDeviceInformation(gatewayIp: String) {
-        try {
-            val url = "http://$gatewayIp/api/device/information"
-            val req = buildRequest(url).get().build()
-            val res = client.newCall(req).execute()
-            val body = res.body?.string()
-            if (res.isSuccessful && body != null && body.contains("<response>")) {
-                extractXmlTag(body, "DeviceName")?.let { realDeviceModel = it }
-                extractXmlTag(body, "SoftwareVersion")?.let { realFirmware = "$it (Mod)" }
+        var fallbackName: String? = null
+        for (path in listOf("api/device/information", "api/device/basic_information")) {
+            try {
+                val req = buildRequest("http://$gatewayIp/$path").get().build()
+                val body = client.newCall(req).execute().use { it.body?.string() }
+                if (body == null || !body.contains("<response>") || isLoginError(body)) continue
+
+                if (realDeviceModel.isBlank()) detectModelName(body)?.let { realDeviceModel = it }
+                if (fallbackName == null) {
+                    fallbackName = (extractXmlTag(body, "DeviceName") ?: extractXmlTag(body, "ProductFamily")
+                        ?: extractXmlTag(body, "productfamily"))?.takeIf { it.isNotBlank() }
+                }
+                extractXmlTag(body, "SoftwareVersion")?.takeIf { it.isNotBlank() }
+                    ?.let { realFirmware = it }
                 extractXmlTag(body, "WanIPAddress")?.let { if (it.isNotBlank()) realWanIp = it }
+            } catch (_: Exception) {}
+        }
+        if (realDeviceModel.isBlank() && fallbackName != null) realDeviceModel = normalizeModelName(fallbackName!!)
+    }
+
+    /** Nama model & firmware terakhir yang terdeteksi dari modem (kosong bila belum terbaca). */
+    fun getDeviceModel(): String = realDeviceModel
+    fun getFirmware(): String = realFirmware
+
+    /**
+     * Membaca model & firmware TANPA login (untuk ditampilkan di halaman login).
+     * Return null jika modem tidak menyediakan informasinya sebelum login.
+     */
+    suspend fun probeDeviceInfo(gatewayIp: String): Pair<String, String>? = withContext(Dispatchers.IO) {
+        try {
+            refreshToken(gatewayIp)
+            var model = ""
+            var firmware = ""
+            for (path in listOf("api/device/information", "api/device/basic_information")) {
+                val body = try {
+                    client.newCall(buildRequest("http://$gatewayIp/$path").get().build())
+                        .execute().use { it.body?.string() }
+                } catch (_: Exception) { null } ?: continue
+                if (!body.contains("<response>") || isLoginError(body)) continue
+                if (model.isBlank()) detectModelName(body)?.let { model = it }
+                if (firmware.isBlank()) extractXmlTag(body, "SoftwareVersion")?.takeIf { it.isNotBlank() }?.let { firmware = it }
             }
-        } catch (_: Exception) {}
+            if (model.isBlank() && firmware.isBlank()) null else model to firmware
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** "E5372" -> "Huawei E5372"; "Huawei E5372s-32" tetap apa adanya. */
+    private fun normalizeModelName(raw: String): String {
+        val name = raw.trim()
+        return if (name.startsWith("Huawei", ignoreCase = true)) name else "Huawei $name"
     }
 
     /**
@@ -807,6 +918,226 @@ class HilinkModemService {
             }
         } catch (e: Exception) {
             Log.e("HilinkService", "executeRebootModem error", e)
+            Result.failure(e)
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Sesi: dipakai untuk pulih setelah aplikasi di background / token kedaluwarsa
+    // ------------------------------------------------------------------------------------
+
+    /**
+     * Ambil token baru dan login ulang bila modem menolak sesi lama.
+     * Return true jika modem terjangkau (token berhasil didapat dan status modem terbaca).
+     */
+    suspend fun refreshSession(gatewayIp: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            cachedToken = null
+            cachedSessionCookie = null
+            cookieStore.clear()
+            refreshToken(gatewayIp)
+
+            val reachable = client.newCall(buildRequest("http://$gatewayIp/api/monitoring/status").get().build())
+                .execute().use { r ->
+                    val body = r.body?.string()
+                    r.isSuccessful && !body.isNullOrBlank() && body.contains("<response>")
+                }
+            if (!reachable) return@withContext false
+
+            if (modemRequiresLogin(gatewayIp)) {
+                if (attemptLogin(gatewayIp, lastUser, lastPass) != LoginResult.OK) return@withContext false
+            }
+            if (realDeviceModel.isBlank()) fetchDeviceInformation(gatewayIp)
+            true
+        } catch (e: Exception) {
+            Log.w("HilinkService", "refreshSession gagal: ${e.message}")
+            false
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Perangkat terhubung & blokir (MAC filter)
+    // ------------------------------------------------------------------------------------
+
+    /** Daftar perangkat aktif yang terhubung ke Wi-Fi modem. Menggabungkan beberapa endpoint HiLink. */
+    suspend fun fetchHostList(gatewayIp: String): Result<List<ConnectedDevice>> = withContext(Dispatchers.IO) {
+        try {
+            val byMac = LinkedHashMap<String, ConnectedDevice>()
+            var anyResponse = false
+            var lastProblem: String? = null
+            val now = System.currentTimeMillis()
+            val hostRegex = Regex("<Host>(.*?)</Host>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            val inactive = Regex("<Active>\\s*(0|false)\\s*</Active>", RegexOption.IGNORE_CASE)
+
+            for (path in listOf("api/wlan/host-list", "api/wlan/station-information", "api/lan/HostInfo")) {
+                val xml = try {
+                    client.newCall(buildRequest("http://$gatewayIp/$path").get().build())
+                        .execute().use { it.body?.string() }
+                } catch (e: Exception) {
+                    lastProblem = "tidak ada respons dari modem"
+                    null
+                } ?: continue
+
+                if (isLoginError(xml)) { lastProblem = "modem meminta login (kode ${extractXmlTag(xml, "code") ?: "?"})"; continue }
+                if (!xml.contains("<response>")) { lastProblem = "respons $path tidak dikenali"; continue }
+                anyResponse = true
+
+                for (m in hostRegex.findAll(xml)) {
+                    val block = m.groupValues[1]
+                    if (inactive.containsMatchIn(block)) continue
+                    val mac = (extractXmlTag(block, "MacAddress") ?: extractXmlTag(block, "Mac"))
+                        ?.trim()?.uppercase().orEmpty()
+                    if (mac.isBlank()) continue
+                    val ip = extractXmlTag(block, "IpAddress").orEmpty()
+                    val name = extractXmlTag(block, "HostName")?.takeIf { it.isNotBlank() }
+                    val seconds = extractXmlTag(block, "AssociatedTime")?.toLongOrNull() ?: 0L
+
+                    val existing = byMac[mac]
+                    if (existing == null) {
+                        byMac[mac] = ConnectedDevice(
+                            mac = mac,
+                            ip = ip,
+                            name = name ?: "Perangkat tanpa nama",
+                            connectedSinceMs = if (seconds > 0) now - seconds * 1000L else 0L,
+                            connectedSeconds = seconds
+                        )
+                    } else {
+                        // Lengkapi data yang kosong dari endpoint lain
+                        byMac[mac] = existing.copy(
+                            ip = existing.ip.ifBlank { ip },
+                            name = if (existing.name == "Perangkat tanpa nama" && name != null) name else existing.name,
+                            connectedSinceMs = if (existing.connectedSeconds <= 0 && seconds > 0) now - seconds * 1000L else existing.connectedSinceMs,
+                            connectedSeconds = if (existing.connectedSeconds <= 0) seconds else existing.connectedSeconds
+                        )
+                    }
+                }
+            }
+            if (!anyResponse) Result.failure(IOException(lastProblem ?: "daftar perangkat tidak dapat dibaca"))
+            else Result.success(byMac.values.toList())
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private data class MacFilterSsid(
+        val index: String,
+        val status: Int,
+        val macs: MutableList<Pair<String, String>> // mac to hostname
+    )
+
+    private fun parseMacFilter(xml: String): List<MacFilterSsid> {
+        val ssidRegex = Regex("<Ssid>(.*?)</Ssid>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        return ssidRegex.findAll(xml).map { m ->
+            val b = m.groupValues[1]
+            val macs = mutableListOf<Pair<String, String>>()
+            for (i in 0..9) {
+                val mac = extractXmlTag(b, "WifiMacFilterMac$i").orEmpty().trim()
+                val host = extractXmlTag(b, "wifihostname$i").orEmpty().trim()
+                if (mac.isNotBlank()) macs.add(mac.uppercase() to host)
+            }
+            MacFilterSsid(
+                index = extractXmlTag(b, "Index") ?: "0",
+                status = extractXmlTag(b, "WifiMacFilterStatus")?.toIntOrNull() ?: 0,
+                macs = macs
+            )
+        }.toList()
+    }
+
+    private fun xmlEscape(s: String): String =
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    private fun buildMacFilterXml(ssids: List<MacFilterSsid>): String {
+        val sb = StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?><request><Ssids>")
+        for (ssid in ssids) {
+            sb.append("<Ssid><Index>${ssid.index}</Index><WifiMacFilterStatus>${ssid.status}</WifiMacFilterStatus>")
+            for (i in 0..9) {
+                val entry = ssid.macs.getOrNull(i)
+                sb.append("<WifiMacFilterMac$i>${entry?.first.orEmpty()}</WifiMacFilterMac$i>")
+                sb.append("<wifihostname$i>${xmlEscape(entry?.second.orEmpty())}</wifihostname$i>")
+            }
+            sb.append("</Ssid>")
+        }
+        sb.append("</Ssids></request>")
+        return sb.toString()
+    }
+
+    private fun readMacFilter(gatewayIp: String): List<MacFilterSsid>? {
+        val xml = client.newCall(buildRequest("http://$gatewayIp/api/wlan/multi-macfilter-settings").get().build())
+            .execute().use { it.body?.string() } ?: return null
+        if (!xml.contains("<response>") || isLoginError(xml)) return null
+        return parseMacFilter(xml).takeIf { it.isNotEmpty() }
+    }
+
+    private fun writeMacFilter(gatewayIp: String, ssids: List<MacFilterSsid>): Result<Unit> {
+        refreshToken(gatewayIp)
+        val req = buildRequest("http://$gatewayIp/api/wlan/multi-macfilter-settings")
+            .post(buildMacFilterXml(ssids).toRequestBody(xmlMediaType))
+            .build()
+        val body = client.newCall(req).execute().use { it.body?.string() }
+        return if (body?.contains("<response>OK</response>") == true) {
+            Result.success(Unit)
+        } else {
+            val code = body?.let { extractXmlTag(it, "code") }
+            Result.failure(IOException("Modem menolak perubahan daftar blokir" + (code?.let { " (kode $it)" } ?: "")))
+        }
+    }
+
+    /** Daftar perangkat yang diblokir (mode blacklist pada MAC filter modem). */
+    suspend fun fetchBlockedDevices(gatewayIp: String): Result<List<BlockedDevice>> = withContext(Dispatchers.IO) {
+        try {
+            val ssids = readMacFilter(gatewayIp)
+                ?: return@withContext Result.failure(IOException("Daftar blokir tidak dapat dibaca"))
+            val seen = LinkedHashMap<String, BlockedDevice>()
+            ssids.filter { it.status == 2 }.forEach { ssid ->
+                ssid.macs.forEach { (mac, host) ->
+                    if (!seen.containsKey(mac)) {
+                        seen[mac] = BlockedDevice(mac = mac, name = host.ifBlank { "Perangkat tanpa nama" })
+                    }
+                }
+            }
+            Result.success(seen.values.toList())
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Blokir perangkat: tambahkan MAC ke blacklist semua SSID modem. */
+    suspend fun blockDevice(gatewayIp: String, mac: String, name: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val target = mac.uppercase()
+            val ssids = readMacFilter(gatewayIp)
+                ?: return@withContext Result.failure(IOException("Pengaturan MAC filter modem tidak dapat dibaca"))
+            if (ssids.any { it.status == 1 }) {
+                return@withContext Result.failure(IOException("MAC filter modem sedang mode whitelist. Ubah dulu di WebUI modem."))
+            }
+            for (ssid in ssids) {
+                if (ssid.macs.none { it.first == target }) {
+                    if (ssid.macs.size >= 10) {
+                        return@withContext Result.failure(IOException("Daftar blokir penuh (maksimal 10 perangkat)"))
+                    }
+                    ssid.macs.add(target to name)
+                }
+            }
+            val updated = ssids.map { MacFilterSsid(it.index, 2, it.macs) }
+            writeMacFilter(gatewayIp, updated)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Buka blokir perangkat: hapus MAC dari blacklist. Filter dimatikan jika daftar jadi kosong. */
+    suspend fun unblockDevice(gatewayIp: String, mac: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val target = mac.uppercase()
+            val ssids = readMacFilter(gatewayIp)
+                ?: return@withContext Result.failure(IOException("Pengaturan MAC filter modem tidak dapat dibaca"))
+            val updated = ssids.map { ssid ->
+                val remaining = ssid.macs.filter { it.first != target }.toMutableList()
+                val status = if (ssid.status == 2 && remaining.isEmpty()) 0 else ssid.status
+                MacFilterSsid(ssid.index, status, remaining)
+            }
+            writeMacFilter(gatewayIp, updated)
+        } catch (e: Exception) {
             Result.failure(e)
         }
     }

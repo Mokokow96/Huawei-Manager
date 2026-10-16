@@ -83,6 +83,10 @@ fun SignalHunterScreen(
     }
 
     val signalData by viewModel.signalData.collectAsState()
+    val linkState by viewModel.linkState.collectAsState()
+    val offlineAttempt by viewModel.offlineAttempt.collectAsState()
+    val secondsToNextRetry by viewModel.secondsToNextRetry.collectAsState()
+    val isDemoModeHunter by viewModel.isDemoMode.collectAsState()
     val sessionMaxSinr by viewModel.sessionMaxSinr.collectAsState()
     val audioBeepEnabled by viewModel.audioBeepEnabled.collectAsState()
     val sinrHistory by viewModel.sinrHistory.collectAsState()
@@ -180,6 +184,15 @@ fun SignalHunterScreen(
                     )
                 }
             }
+
+            // Status offline + auto retry / refresh manual
+            com.example.ui.components.OfflineBanner(
+                linkState = if (isDemoModeHunter) com.example.model.LinkState.ONLINE else linkState,
+                attempt = offlineAttempt,
+                maxAttempts = 10,
+                secondsToNext = secondsToNextRetry,
+                onManualRefresh = { viewModel.manualRefresh() }
+            )
 
             // 1. Tower Identification Card: PCI & Cell ID
             Card(
@@ -644,14 +657,17 @@ fun SignalHunterScreen(
                 border = androidx.compose.foundation.BorderStroke(1.dp, DarkNavySurfaceElevated)
             ) {
                 Column(
-                    modifier = Modifier.padding(18.dp)
+                    modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 14.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
                             Box(
                                 modifier = Modifier
                                     .size(32.dp)
@@ -667,7 +683,7 @@ fun SignalHunterScreen(
                                 )
                             }
                             Spacer(modifier = Modifier.width(10.dp))
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = "Grafik Riwayat SINR",
                                     style = MaterialTheme.typography.bodyMedium.copy(
@@ -676,29 +692,34 @@ fun SignalHunterScreen(
                                     )
                                 )
                                 Text(
-                                    text = "Respon perubahan kekuatan sinyal saat memutar antena",
+                                    text = "Respon sinyal saat antena diputar",
                                     fontSize = 10.sp,
-                                    color = TextSecondary
+                                    color = TextSecondary,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                 )
                             }
                         }
 
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = "Real-time",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = SignalGreen
+                            color = SignalGreen,
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
 
                     // Enlarged High-Resolution Oscilloscope Graph with Vertical Auto-Range on Left
                     SinrExpandedChart(
                         history = sinrHistory,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(130.dp)
+                            .height(110.dp)
                     )
                 }
             }
@@ -765,8 +786,12 @@ private fun SinrExpandedChart(
     // secara vertikal dari paling lemah sampai paling tinggi yang otomatis menyesuaikan rentangnya sendiri"
     val rawMin = if (history.isNotEmpty()) history.minOrNull() ?: 0f else 0f
     val rawMax = if (history.isNotEmpty()) history.maxOrNull() ?: 15f else 15f
-    val minVal = (kotlin.math.floor(rawMin - 0.5f)).coerceAtLeast(-5f)
-    val maxVal = (kotlin.math.ceil(rawMax + 1.0f)).coerceAtLeast(minVal + 4f)
+    // Rentang minimal 5 dB, dipusatkan di sekitar data supaya gelombang tidak menempel di dasar
+    // dengan ruang kosong besar di atasnya.
+    val center = (rawMin + rawMax) / 2f
+    val halfSpan = kotlin.math.max((rawMax - rawMin) / 2f + 1f, 2.5f)
+    val minVal = kotlin.math.floor(center - halfSpan)
+    val maxVal = kotlin.math.ceil(center + halfSpan)
     val midVal = (minVal + maxVal) / 2f
 
     Row(
