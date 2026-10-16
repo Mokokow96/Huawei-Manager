@@ -840,7 +840,7 @@ fun DashboardScreen(
                                 )
                                 Spacer(modifier = Modifier.height(2.dp))
                                 Text(
-                                    text = "${quotaLimitGb.toInt()} GB",
+                                    text = formatLimitGb(quotaLimitGb),
                                     style = MaterialTheme.typography.bodyLarge.copy(
                                         fontWeight = FontWeight.ExtraBold,
                                         color = TextPrimary
@@ -879,7 +879,7 @@ fun DashboardScreen(
                     }
 
                     // Quota Usage Progress Bar
-                    val limitBytes = (quotaLimitGb * 1_000_000_000L).toLong()
+                    val limitBytes = (quotaLimitGb * 1024f * 1024f * 1024f).toLong()
                     val usedFraction = if (limitBytes > 0) (totalBytes.toFloat() / limitBytes.toFloat()).coerceIn(0f, 1f) else 0f
                     val progressColor = when {
                         usedFraction >= 0.9f -> WarningRed
@@ -1075,7 +1075,18 @@ fun DashboardScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            // Tanda tangan pengembang (hanya tampil di halaman utama setelah login)
+            Text(
+                text = "Dikembangkan oleh Moko96",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp, bottom = 10.dp)
+                    .testTag("developer_signature"),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = TextMuted
+            )
         }
 
         // Reboot confirmation dialog
@@ -1157,6 +1168,10 @@ private fun formatSpeed(bytesPerSec: Long): Pair<String, String> {
             Pair(bytesPerSec.toString(), "B/s")
         }
     }
+}
+
+private fun formatLimitGb(gb: Float): String {
+    return if (gb % 1f == 0f) "${gb.toInt()} GB" else String.format(Locale.US, "%.1f GB", gb)
 }
 
 private fun formatBytes(bytes: Long): String {

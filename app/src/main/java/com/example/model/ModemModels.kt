@@ -87,7 +87,7 @@ data class TrafficData(
     val currentUploadBytes: Long = 0L,
     val monthDownloadBytes: Long = 0L,
     val monthUploadBytes: Long = 0L,
-    val monthQuotaLimitBytes: Long = 50_000_000_000L, // 50 GB default quota
+    val monthQuotaLimitBytes: Long = 53_687_091_200L, // 50 GB (GiB) default quota
     val resetDayOfMonth: Int = 1
 ) {
     val totalMonthBytes: Long

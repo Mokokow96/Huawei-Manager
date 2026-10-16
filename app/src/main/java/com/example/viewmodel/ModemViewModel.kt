@@ -29,6 +29,11 @@ enum class AppScreen {
 
 class ModemViewModel(application: Application) : AndroidViewModel(application) {
 
+    private companion object {
+        // Modem Huawei menghitung GB sebagai GiB (1024^3), sama dengan formatBytes() di Dashboard
+        const val BYTES_PER_GB = 1024f * 1024f * 1024f
+    }
+
     private val modemService = HilinkModemService()
     private val wifiHelper = WifiNetworkHelper(application.applicationContext)
     private val beeper = AntennaBeeper(application.applicationContext)
@@ -157,7 +162,7 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
             // Real connection: Bind socket routing to Wi-Fi
             wifiHelper.bindToWifiNetwork()
 
-            val checkResult = modemService.checkConnection(ip)
+            val checkResult = modemService.checkConnection(ip, user, pass)
             _isConnecting.value = false
 
             checkResult.onSuccess {
@@ -199,18 +204,23 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
         _selectedBand.value = activeBand
 
         if (!demo) {
-            val (limitBytes, startDay) = modemService.fetchDataLimitSettings(ip)
-            if (limitBytes > 0) {
-                val gb = limitBytes / 1_000_000_000f
-                _quotaLimitGb.value = gb
-                _resetDayOfMonth.value = startDay
-                prefs.quotaLimitGb = gb
-                prefs.resetDayOfMonth = startDay
-                _trafficData.value = _trafficData.value.copy(
-                    monthQuotaLimitBytes = limitBytes,
-                    resetDayOfMonth = startDay
-                )
-            }
+            syncDataLimitFromModem(ip)
+        }
+    }
+
+    /** Baca batas kuota & tanggal reset yang tersimpan di modem lalu tampilkan di UI. */
+    private suspend fun syncDataLimitFromModem(ip: String) {
+        val (limitBytes, startDay) = modemService.fetchDataLimitSettings(ip)
+        if (limitBytes > 0) {
+            val gb = limitBytes / BYTES_PER_GB
+            _quotaLimitGb.value = gb
+            prefs.quotaLimitGb = gb
+            _trafficData.value = _trafficData.value.copy(monthQuotaLimitBytes = limitBytes)
+        }
+        if (startDay in 1..31) {
+            _resetDayOfMonth.value = startDay
+            prefs.resetDayOfMonth = startDay
+            _trafficData.value = _trafficData.value.copy(resetDayOfMonth = startDay)
         }
     }
 
@@ -316,14 +326,19 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
         prefs.resetDayOfMonth = resetDay
         _showDataLimitDialog.value = false
 
-        val limitBytes = (limitGb * 1_000_000_000L).toLong()
+        val limitBytes = (limitGb * BYTES_PER_GB).toLong()
         _trafficData.value = _trafficData.value.copy(
             monthQuotaLimitBytes = limitBytes,
             resetDayOfMonth = resetDay
         )
 
+        if (_isDemoMode.value) return
         viewModelScope.launch {
             modemService.updateDataLimitSettings(_gatewayIp.value, limitBytes, resetDay)
+            // Selalu sinkron ulang dari modem supaya UI menampilkan nilai yang benar-benar tersimpan
+            // (jika modem menolak, tampilan kembali ke pengaturan asli modem).
+            delay(500)
+            syncDataLimitFromModem(_gatewayIp.value)
         }
     }
 
@@ -369,7 +384,10 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
                 // 2. Fetch traffic & network status
                 val trafficResult = modemService.fetchTrafficData(ip, demo)
                 trafficResult.onSuccess { tf ->
-                    _trafficData.value = tf
+                    _trafficData.value = tf.copy(
+                        monthQuotaLimitBytes = (_quotaLimitGb.value * BYTES_PER_GB).toLong(),
+                        resetDayOfMonth = _resetDayOfMonth.value
+                    )
                 }
 
                 val netResult = modemService.fetchNetworkStatus(ip, demo)

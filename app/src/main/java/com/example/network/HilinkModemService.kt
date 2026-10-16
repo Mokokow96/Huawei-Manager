@@ -1,5 +1,6 @@
 package com.example.network
 
+import android.util.Base64
 import android.util.Log
 import com.example.model.BandOption
 import com.example.model.ConnectionState
@@ -16,6 +17,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 import kotlin.random.Random
@@ -56,7 +58,6 @@ class HilinkModemService {
     private var detectedBand: BandOption = BandOption.INDONESIA_BANDS[0]
     private var detectedBandName: String = "Auto Band"
     private var realOperator: String = ""
-    private var realWifiUsers: Int = 1
 
     // Simulation fallback only if user explicitly starts Demo Mode
     private var simSinr = 10.5f
@@ -72,7 +73,11 @@ class HilinkModemService {
     private var antennaAngleDegrees = 45f
     private var antennaSweepDirection = 1
 
-    suspend fun checkConnection(gatewayIp: String): Result<Boolean> = withContext(Dispatchers.IO) {
+    suspend fun checkConnection(
+        gatewayIp: String,
+        username: String = "",
+        password: String = ""
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
         try {
             refreshToken(gatewayIp)
 
@@ -96,6 +101,11 @@ class HilinkModemService {
             }
 
             if (reachable) {
+                // Login hanya dicoba jika modem benar-benar menolak akses (error 125002/100003),
+                // supaya tidak memicu penguncian login akibat salah password berulang.
+                if (modemRequiresLogin(gatewayIp)) {
+                    loginToModem(gatewayIp, username, password)
+                }
                 // Initialize device info, operator, connected users, and active band
                 fetchDeviceInformation(gatewayIp)
                 fetchCurrentOperator(gatewayIp)
@@ -108,6 +118,70 @@ class HilinkModemService {
         } catch (e: Exception) {
             Log.e("HilinkService", "Check connection failed for $gatewayIp", e)
             Result.failure(IOException("Gagal menghubungi modem di $gatewayIp. Pastikan HP terhubung ke Wi-Fi modem E5372."))
+        }
+    }
+
+    private val xmlMediaType = "application/xml; charset=UTF-8".toMediaType()
+
+    private fun sha256Hex(input: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(input.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+    private fun base64(input: String): String =
+        Base64.encodeToString(input.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
+    private fun isLoginError(xml: String?): Boolean {
+        if (xml == null) return false
+        return Regex("<error>.*?<code>(125002|125003|100003)</code>", RegexOption.DOT_MATCHES_ALL)
+            .containsMatchIn(xml)
+    }
+
+    /** True jika endpoint yang butuh sesi (host-list) ditolak modem karena belum login. */
+    private fun modemRequiresLogin(gatewayIp: String): Boolean {
+        return try {
+            val res = client.newCall(buildRequest("http://$gatewayIp/api/wlan/host-list").get().build()).execute()
+            res.use { isLoginError(it.body?.string()) }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Login WebUI Huawei (password_type 4: base64(sha256(user + base64(sha256(pass)) + token))).
+     * Best-effort: kegagalan tidak mengubah perilaku endpoint yang memang terbuka.
+     */
+    private fun loginToModem(gatewayIp: String, user: String, pass: String): Boolean {
+        if (user.isBlank() || pass.isBlank()) return false
+        return try {
+            refreshToken(gatewayIp)
+            val token = cachedToken ?: return false
+
+            val stateXml = client.newCall(buildRequest("http://$gatewayIp/api/user/state-login").get().build())
+                .execute().use { it.body?.string() }
+            if (stateXml != null && extractXmlTag(stateXml, "State") == "0") return true
+
+            val pwdType = stateXml?.let { extractXmlTag(it, "password_type") }?.toIntOrNull() ?: 4
+            val encoded = if (pwdType == 4) {
+                base64(sha256Hex(user + base64(sha256Hex(pass)) + token))
+            } else {
+                base64(pass)
+            }
+            val xml = "<request><Username>$user</Username><Password>$encoded</Password>" +
+                "<password_type>$pwdType</password_type></request>"
+
+            val ok = client.newCall(
+                buildRequest("http://$gatewayIp/api/user/login").post(xml.toRequestBody(xmlMediaType)).build()
+            ).execute().use { r ->
+                r.isSuccessful && (r.body?.string()?.contains("<response>OK</response>") == true)
+            }
+            // Token sesi berubah setelah login
+            refreshToken(gatewayIp)
+            Log.d("HilinkService", "Login modem: $ok")
+            ok
+        } catch (e: Exception) {
+            Log.w("HilinkService", "Login modem gagal: ${e.message}")
+            false
         }
     }
 
@@ -328,15 +402,10 @@ class HilinkModemService {
                     }
                 }
 
-                // 2. Wi-Fi Connected Users: check status tags and host-list for real connected devices
-                val statusWifiUsers = extractXmlTag(xml, "CurrentWifiUser")?.toIntOrNull()
-                    ?: extractXmlTag(xml, "TotalWifiUser")?.toIntOrNull()
-                    ?: extractXmlTag(xml, "CurrentWifiUserEx")?.toIntOrNull()
-                    ?: extractXmlTag(xml, "WifiUsers")?.toIntOrNull()
-
+                // 2. Wi-Fi Connected Users: hitung langsung tiap polling (tanpa nilai "menempel")
+                val statusWifiUsers = extractXmlTag(xml, "CurrentWifiUser")?.toIntOrNull() ?: 0
                 val hostUsers = fetchConnectedWifiUsers(gatewayIp)
-                val users = maxOf(statusWifiUsers ?: 0, hostUsers, realWifiUsers).coerceAtLeast(1)
-                realWifiUsers = users
+                val users = maxOf(statusWifiUsers, hostUsers).coerceAtLeast(1)
 
                 // 3. WAN IP: inspect all endpoints so it's NEVER empty
                 val wanIp = fetchWanIp(gatewayIp)
@@ -423,89 +492,96 @@ class HilinkModemService {
     }
 
     /**
-     * Resolves the exact number of connected Wi-Fi devices from multiple endpoints
+     * Menghitung perangkat yang terhubung. Mengambil nilai terbesar dari daftar host (unik per MAC)
+     * dan CurrentWifiUser. TotalWifiUser sengaja TIDAK dipakai: itu kapasitas maksimum, bukan jumlah aktif.
      */
     suspend fun fetchConnectedWifiUsers(gatewayIp: String): Int = withContext(Dispatchers.IO) {
-        try {
-            // 1. Try host-list
-            val hostUrl = "http://$gatewayIp/api/wlan/host-list"
-            val resHost = client.newCall(buildRequest(hostUrl).get().build()).execute()
-            val hostXml = resHost.body?.string()
-            if (resHost.isSuccessful && hostXml != null) {
-                val hostTagCount = countOccurrencesRegex(hostXml, "(?i)<(Host|host)>")
-                val macTagCount = countOccurrencesRegex(hostXml, "(?i)<Mac")
-                val ipTagCount = countOccurrencesRegex(hostXml, "(?i)<IpAddress>")
-                val detected = maxOf(hostTagCount, macTagCount, ipTagCount)
-                if (detected > 0) {
-                    realWifiUsers = detected
-                    return@withContext detected
+        var best = 0
+        for (path in listOf("api/wlan/host-list", "api/lan/HostInfo")) {
+            try {
+                val xml = client.newCall(buildRequest("http://$gatewayIp/$path").get().build())
+                    .execute().use { it.body?.string() }
+                if (xml != null && !isLoginError(xml)) {
+                    best = maxOf(best, countHosts(xml))
                 }
-            }
-
-            // 2. Try status & converged-status & station-information
-            val statusUrls = listOf(
-                "http://$gatewayIp/api/monitoring/converged-status",
-                "http://$gatewayIp/api/monitoring/status",
-                "http://$gatewayIp/api/wlan/station-information",
-                "http://$gatewayIp/api/wlan/basic-settings"
-            )
-            for (url in statusUrls) {
-                try {
-                    val res = client.newCall(buildRequest(url).get().build()).execute()
-                    val xml = res.body?.string()
-                    if (res.isSuccessful && xml != null) {
-                        val users = extractXmlTag(xml, "CurrentWifiUser")?.toIntOrNull()
-                            ?: extractXmlTag(xml, "TotalWifiUser")?.toIntOrNull()
-                            ?: extractXmlTag(xml, "WifiUsers")?.toIntOrNull()
-                            ?: extractXmlTag(xml, "user_num")?.toIntOrNull()
-                            ?: extractXmlTag(xml, "CurrentWifiUserEx")?.toIntOrNull()
-                            ?: extractXmlTag(xml, "AssociatedStations")?.toIntOrNull()
-                            ?: extractXmlTag(xml, "CurrentAccessDevices")?.toIntOrNull()
-                        if (users != null && users > 0) {
-                            realWifiUsers = users
-                            return@withContext users
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
+            } catch (_: Exception) {}
+        }
+        try {
+            val xml = client.newCall(buildRequest("http://$gatewayIp/api/monitoring/status").get().build())
+                .execute().use { it.body?.string() }
+            val users = xml?.let { extractXmlTag(it, "CurrentWifiUser") }?.toIntOrNull()
+            if (users != null) best = maxOf(best, users)
         } catch (_: Exception) {}
-        return@withContext realWifiUsers.coerceAtLeast(1)
+        best
     }
 
+    private fun countHosts(xml: String): Int {
+        val blocks = Regex("<Host>(.*?)</Host>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .findAll(xml).map { it.groupValues[1] }.toList()
+        val macs = HashSet<String>()
+        var anonymous = 0
+        for (block in blocks) {
+            if (Regex("<Active>\\s*(0|false)\\s*</Active>", RegexOption.IGNORE_CASE).containsMatchIn(block)) continue
+            val mac = extractXmlTag(block, "MacAddress") ?: extractXmlTag(block, "Mac")
+            if (mac.isNullOrBlank()) anonymous++ else macs.add(mac.uppercase())
+        }
+        return macs.size + anonymous
+    }
+
+    /**
+     * Membaca batas data & tanggal reset dari modem.
+     * Huawei menyimpan DataLimit sebagai teks (mis. "50GB") dan trafficmaxlimit dalam byte (GiB = 1024^3).
+     * Return (batasByte, tanggalReset). batasByte = 0 jika tidak terbaca/tidak diatur; tanggalReset = 0 jika gagal baca.
+     */
     suspend fun fetchDataLimitSettings(gatewayIp: String): Pair<Long, Int> = withContext(Dispatchers.IO) {
         try {
-            val url = "http://$gatewayIp/api/monitoring/start_date"
-            val req = buildRequest(url).get().build()
-            val res = client.newCall(req).execute()
-            val xml = res.body?.string()
-            if (res.isSuccessful && xml != null && xml.contains("<StartDay>")) {
-                val startDay = extractXmlTag(xml, "StartDay")?.toIntOrNull() ?: 1
-                val dataLimit = extractXmlTag(xml, "DataLimit")?.toLongOrNull() ?: 50_000_000_000L
-                return@withContext Pair(dataLimit, startDay)
+            val req = buildRequest("http://$gatewayIp/api/monitoring/start_date").get().build()
+            val xml = client.newCall(req).execute().use { it.body?.string() }
+            if (xml != null && xml.contains("<StartDay>")) {
+                val startDay = extractXmlTag(xml, "StartDay")?.toIntOrNull()?.coerceIn(1, 31) ?: 0
+                val fromBytes = extractXmlTag(xml, "trafficmaxlimit")?.toLongOrNull() ?: 0L
+                val limit = if (fromBytes > 0L) fromBytes else parseDataLimitBytes(extractXmlTag(xml, "DataLimit"))
+                return@withContext Pair(limit, startDay)
             }
         } catch (_: Exception) {}
-        Pair(50_000_000_000L, 1)
+        Pair(0L, 0)
+    }
+
+    private fun parseDataLimitBytes(raw: String?): Long {
+        if (raw.isNullOrBlank()) return 0L
+        val m = Regex("([0-9]+(?:\\.[0-9]+)?)\\s*(TB|GB|MB|KB)?", RegexOption.IGNORE_CASE).find(raw.trim()) ?: return 0L
+        val value = m.groupValues[1].toDoubleOrNull() ?: return 0L
+        val unit = m.groupValues[2].uppercase()
+        val kib = 1024.0
+        return when (unit) {
+            "TB" -> (value * kib * kib * kib * kib).toLong()
+            "GB" -> (value * kib * kib * kib).toLong()
+            "MB" -> (value * kib * kib).toLong()
+            "KB" -> (value * kib).toLong()
+            else -> if (value >= 1_000_000) value.toLong() else (value * kib * kib * kib).toLong()
+        }
+    }
+
+    private fun formatDataLimitForModem(limitBytes: Long): String {
+        val gib = limitBytes / (1024.0 * 1024.0 * 1024.0)
+        return if (gib % 1.0 == 0.0) "${gib.toLong()}GB" else String.format(java.util.Locale.US, "%.1fGB", gib)
     }
 
     suspend fun updateDataLimitSettings(gatewayIp: String, limitBytes: Long, startDay: Int): Result<Boolean> = withContext(Dispatchers.IO) {
         try {
             refreshToken(gatewayIp)
-            val xml = """
-                <request>
-                    <StartDay>$startDay</StartDay>
-                    <DataLimit>$limitBytes</DataLimit>
-                    <MonthThreshold>90</MonthThreshold>
-                </request>
-            """.trimIndent()
-            val mediaType = "application/xml; charset=UTF-8".toMediaType()
+            val xml = "<request><StartDay>$startDay</StartDay>" +
+                "<DataLimit>${formatDataLimitForModem(limitBytes)}</DataLimit>" +
+                "<MonthThreshold>90</MonthThreshold><SetMonthData>0</SetMonthData></request>"
             val req = buildRequest("http://$gatewayIp/api/monitoring/start_date")
-                .post(xml.toRequestBody(mediaType))
+                .post(xml.toRequestBody(xmlMediaType))
                 .build()
-            val res = client.newCall(req).execute()
-            if (res.isSuccessful) {
+            val (ok, body) = client.newCall(req).execute().use { it.isSuccessful to it.body?.string() }
+            // Huawei membalas HTTP 200 meski gagal; cek isi respons
+            if (ok && body?.contains("<response>OK</response>") == true) {
                 Result.success(true)
             } else {
-                Result.failure(IOException("Gagal mengatur limit kuota"))
+                Result.failure(IOException("Modem menolak pengaturan limit kuota"))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -824,7 +900,7 @@ class HilinkModemService {
             currentUploadBytes = 28_000_000L,
             monthDownloadBytes = simMonthDownload,
             monthUploadBytes = simMonthUpload,
-            monthQuotaLimitBytes = 50_000_000_000L
+            monthQuotaLimitBytes = 50L * 1024L * 1024L * 1024L
         )
     }
 
