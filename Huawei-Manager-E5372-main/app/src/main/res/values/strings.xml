@@ -1,0 +1,28 @@
+<resources>
+    <string name="app_name">Sinyal E5372</string>
+    <string name="modem_model">Huawei E5372</string>
+    <string name="firmware_ver">21.290.23.00.00 (Mod)</string>
+    <string name="login_title">Koneksi Modem E5372</string>
+    <string name="login_subtitle">Hubungkan ke WebUI Huawei HiLink</string>
+    <string name="ip_gateway">IP Gateway Modem</string>
+    <string name="username">Username</string>
+    <string name="password">Password</string>
+    <string name="connect">Hubungkan ke Modem</string>
+    <string name="disconnect">Putuskan</string>
+    <string name="demo_mode">Mode Simulasi / Uji Coba</string>
+    <string name="band_selector">Pilihan Band</string>
+    <string name="change_ip">Ganti IP</string>
+    <string name="signal_hunter">Pencari Sinyal</string>
+    <string name="speed_download">Download</string>
+    <string name="speed_upload">Upload</string>
+    <string name="ip_address">Alamat IP WAN</string>
+    <string name="bandwidth">Bandwidth</string>
+    <string name="monthly_data">Pemakaian Data Bulan Ini</string>
+    <string name="sinr_title">Kualitas Sinyal (SINR)</string>
+    <string name="rssi_title">Kekuatan Sinyal (RSSI)</string>
+    <string name="pci_title">PCI (Physical Cell ID)</string>
+    <string name="cell_id">Cell ID</string>
+    <string name="rsrp_title">RSRP</string>
+    <string name="rsrq_title">RSRQ</string>
+    <string name="audio_beep">Beeper Suara Antena</string>
+</resources>

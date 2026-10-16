@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <!-- Gradasi biru sesuai ikon referensi (kiri-atas terang ke kanan-bawah pekat) -->
+    <gradient
+        android:angle="315"
+        android:startColor="#FF17A3FD"
+        android:endColor="#FF0447F7"
+        android:type="linear" />
+</shape>
