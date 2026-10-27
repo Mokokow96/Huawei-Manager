@@ -8,6 +8,9 @@ import com.huawei.manager.newui.model.ConnectedDevice
 import com.huawei.manager.newui.model.ConnectionState
 import com.huawei.manager.newui.model.NetworkStatus
 import com.huawei.manager.newui.model.SignalData
+import com.huawei.manager.newui.model.TempReading
+import com.huawei.manager.newui.model.TempStatus
+import com.huawei.manager.newui.model.TemperatureData
 import com.huawei.manager.newui.model.TrafficData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -78,6 +81,11 @@ class HilinkModemService {
     private var simMonthUpload = 4_230_000_000L
     private var antennaAngleDegrees = 45f
     private var antennaSweepDirection = 1
+    private var simTemp = 47f
+
+    // Pemantauan suhu: endpoint yang terbukti memberi data suhu disimpan agar polling berikutnya hanya 1 request
+    private var tempEndpoint: String? = null
+    private var lastTempProbeMs = 0L
 
     suspend fun checkConnection(
         gatewayIp: String,
@@ -333,6 +341,110 @@ class HilinkModemService {
             }
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Suhu chipset (Balong pada E5372)
+    // ------------------------------------------------------------------------------------
+
+    private val tempCandidateEndpoints = listOf(
+        "api/device/information",
+        "api/device/signal",
+        "api/monitoring/status",
+        "api/device/boardinfo",
+        "api/monitoring/converged-status",
+        "api/device/basic_information",
+        "api/monitoring/check-notifications",
+        "api/device/antenna_status"
+    )
+
+    private val tempTagRegex = Regex("<([A-Za-z0-9_]*[Tt][Ee][Mm][Pp][A-Za-z0-9_]*)>([^<]*)</\\1>")
+
+    private fun tempLabelFor(tag: String): String {
+        val t = tag.lowercase()
+        return when {
+            t.contains("battery") || t.contains("batt") -> "Baterai"
+            t.contains("chip") || t.contains("cpu") || t.contains("soc") || t.contains("balong") -> "Chipset (Balong)"
+            t.contains("pa") && !t.contains("pap") -> "Power Amplifier"
+            t.contains("sim") -> "SIM"
+            t.contains("board") -> "Board"
+            else -> tag
+        }
+    }
+
+    /** Ubah nilai mentah modem ke derajat Celsius. Mengembalikan null jika tidak masuk akal. */
+    private fun normalizeTemp(raw: String): Float? {
+        val v = raw.replace("°", "").replace("℃", "").replace("C", "", ignoreCase = true).trim().toFloatOrNull()
+            ?: return null
+        val c = if (v > 200f) v / 10f else v   // sebagian firmware memakai satuan 0,1 °C (mis. 452 -> 45,2)
+        return if (c in 1f..150f && c != 255f) c else null
+    }
+
+    private fun parseTempReadings(xml: String): List<TempReading> =
+        tempTagRegex.findAll(xml).mapNotNull { m ->
+            val tag = m.groupValues[1]
+            if (tag.contains("template", ignoreCase = true)) return@mapNotNull null
+            val c = normalizeTemp(m.groupValues[2]) ?: return@mapNotNull null
+            TempReading(label = tempLabelFor(tag), celsius = c, rawTag = tag)
+        }.distinctBy { it.label to it.celsius }.toList()
+
+    private fun readTempFrom(gatewayIp: String, path: String): List<TempReading> {
+        return try {
+            val body = client.newCall(buildRequest("http://$gatewayIp/$path").get().build())
+                .execute().use { it.body?.string() }
+            if (body == null || !body.contains("<response>") || isLoginError(body)) emptyList()
+            else parseTempReadings(body)
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * Membaca suhu modem. Tidak semua firmware HiLink mengekspos sensor suhu, jadi:
+     * - pertama kali, semua endpoint kandidat dicoba lalu endpoint yang berhasil diingat;
+     * - bila tidak ada yang punya data suhu, pencarian ulang hanya tiap 60 detik (tidak membebani modem).
+     * Kegagalan di sini tidak pernah memengaruhi status koneksi modem.
+     */
+    suspend fun fetchTemperature(gatewayIp: String, isDemoMode: Boolean): TemperatureData = withContext(Dispatchers.IO) {
+        if (isDemoMode) {
+            simTemp = (simTemp + Random.nextFloat() * 1.2f - 0.55f).coerceIn(38f, 72f)
+            return@withContext TemperatureData(
+                status = TempStatus.AVAILABLE,
+                readings = listOf(
+                    TempReading("Chipset (Balong)", (simTemp * 10).toInt() / 10f),
+                    TempReading("Baterai", ((simTemp - 12f) * 10).toInt() / 10f)
+                ),
+                source = "demo"
+            )
+        }
+
+        try {
+            tempEndpoint?.let { path ->
+                val r = readTempFrom(gatewayIp, path)
+                if (r.isNotEmpty()) return@withContext TemperatureData(TempStatus.AVAILABLE, r, path)
+                tempEndpoint = null   // endpoint berhenti memberi data -> cari ulang
+            }
+
+            val now = System.currentTimeMillis()
+            if (lastTempProbeMs != 0L && now - lastTempProbeMs < 60_000L) {
+                return@withContext TemperatureData(TempStatus.UNAVAILABLE)
+            }
+            lastTempProbeMs = now
+
+            val found = LinkedHashMap<String, TempReading>()
+            var source = ""
+            for (path in tempCandidateEndpoints) {
+                val r = readTempFrom(gatewayIp, path)
+                if (r.isNotEmpty()) {
+                    if (tempEndpoint == null) { tempEndpoint = path; source = path }
+                    r.forEach { found.putIfAbsent(it.label, it) }
+                }
+            }
+            if (found.isEmpty()) TemperatureData(TempStatus.UNAVAILABLE)
+            else TemperatureData(TempStatus.AVAILABLE, found.values.toList(), source)
+        } catch (_: Exception) {
+            TemperatureData(TempStatus.UNAVAILABLE)
         }
     }
 

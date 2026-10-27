@@ -11,6 +11,7 @@ import com.huawei.manager.newui.model.ConnectionState
 import com.huawei.manager.newui.model.IpChangeProgress
 import com.huawei.manager.newui.model.NetworkStatus
 import com.huawei.manager.newui.model.SignalData
+import com.huawei.manager.newui.model.TemperatureData
 import com.huawei.manager.newui.model.TrafficData
 import com.huawei.manager.newui.network.HilinkModemService
 import com.huawei.manager.newui.network.WifiNetworkHelper
@@ -82,6 +83,10 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _signalData = MutableStateFlow(SignalData())
     val signalData: StateFlow<SignalData> = _signalData.asStateFlow()
+
+    private val _temperatureData = MutableStateFlow(TemperatureData())
+    val temperatureData: StateFlow<TemperatureData> = _temperatureData.asStateFlow()
+    private var lastTempFetchMs = 0L
 
     private val _trafficData = MutableStateFlow(TrafficData())
     val trafficData: StateFlow<TrafficData> = _trafficData.asStateFlow()
@@ -328,6 +333,7 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openSignalHunter() {
         _currentScreen.value = AppScreen.SIGNAL_HUNTER
+        lastTempFetchMs = 0L
         _sessionMaxSinr.value = _signalData.value.sinr
         pollingFast = true
         // Saat offline, loop reconnect yang mengatur polling; jangan dimulai ganda
@@ -457,6 +463,15 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
 
                     if (_audioBeepEnabled.value && _currentScreen.value == AppScreen.SIGNAL_HUNTER) {
                         beeper.playBeepForSinr(sig.sinr)
+                    }
+                }
+
+                // 1b. Suhu chipset: hanya di halaman Pencari Sinyal, tiap 3 detik, gagal pun tidak memengaruhi koneksi
+                if (_currentScreen.value == AppScreen.SIGNAL_HUNTER) {
+                    val nowMs = System.currentTimeMillis()
+                    if (nowMs - lastTempFetchMs >= 3000L) {
+                        lastTempFetchMs = nowMs
+                        _temperatureData.value = modemService.fetchTemperature(ip, demo)
                     }
                 }
 

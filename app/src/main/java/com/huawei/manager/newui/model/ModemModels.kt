@@ -95,6 +95,48 @@ data class SignalData(
         }
 }
 
+/** Satu pembacaan sensor suhu dari modem. */
+data class TempReading(
+    val label: String,       // mis. "Chipset (Balong)", "Baterai"
+    val celsius: Float,
+    val rawTag: String = ""  // nama tag XML asli, berguna untuk diagnosa
+)
+
+enum class TempStatus { CHECKING, AVAILABLE, UNAVAILABLE }
+
+/** Suhu modem (chipset Balong pada E5372). */
+data class TemperatureData(
+    val status: TempStatus = TempStatus.CHECKING,
+    val readings: List<TempReading> = emptyList(),
+    val source: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+) {
+    /** Sensor utama: prioritas chipset/CPU/SoC, lalu PA, lalu yang tertinggi. */
+    val primary: TempReading?
+        get() = readings.firstOrNull { it.label.startsWith("Chipset") }
+            ?: readings.firstOrNull { it.label.startsWith("Power Amplifier") }
+            ?: readings.maxByOrNull { it.celsius }
+
+    val color: Color
+        get() = tempColor(primary?.celsius ?: 0f)
+
+    val label: String
+        get() = tempLabel(primary?.celsius ?: 0f)
+}
+
+fun tempColor(c: Float): Color = when {
+    c < 50f -> SignalGreen
+    c < 65f -> SignalOrange
+    else -> WarningRed
+}
+
+fun tempLabel(c: Float): String = when {
+    c < 50f -> "Normal"
+    c < 65f -> "Hangat"
+    c < 75f -> "Panas"
+    else -> "Sangat Panas"
+}
+
 data class SignalBarQuality(
     val label: String,
     val color: Color

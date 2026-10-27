@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Thermostat
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -57,6 +58,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.huawei.manager.newui.model.TempStatus
+import com.huawei.manager.newui.model.tempColor
 import com.huawei.manager.newui.ui.theme.DarkNavyBase
 import com.huawei.manager.newui.ui.theme.DarkNavySurface
 import com.huawei.manager.newui.ui.theme.DarkNavySurfaceElevated
@@ -91,6 +94,7 @@ fun SignalHunterScreen(
     val audioBeepEnabled by viewModel.audioBeepEnabled.collectAsState()
     val sinrHistory by viewModel.sinrHistory.collectAsState()
     val selectedBand by viewModel.selectedBand.collectAsState()
+    val temperatureData by viewModel.temperatureData.collectAsState()
 
     val scrollState = rememberScrollState()
 
@@ -747,6 +751,149 @@ fun SignalHunterScreen(
                     color = TextSecondary,
                     lineHeight = 16.sp
                 )
+            }
+
+            // Suhu chipset (Balong) - paling bawah halaman
+            val primaryTemp = temperatureData.primary
+            val tempAccent = if (temperatureData.status == TempStatus.AVAILABLE) temperatureData.color else SignalGray
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("chip_temperature_card"),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkNavySurface),
+                border = androidx.compose.foundation.BorderStroke(1.dp, DarkNavySurfaceElevated)
+            ) {
+                Column(modifier = Modifier.padding(18.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(tempAccent.copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Thermostat,
+                                    contentDescription = null,
+                                    tint = tempAccent,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "Suhu Chipset",
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = TextPrimary
+                                    )
+                                )
+                                Text(
+                                    text = "Prosesor Balong modem",
+                                    fontSize = 10.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                        if (temperatureData.status == TempStatus.AVAILABLE && primaryTemp != null) {
+                            Text(
+                                text = temperatureData.label,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = tempAccent,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    when {
+                        temperatureData.status == TempStatus.AVAILABLE && primaryTemp != null -> {
+                            Text(
+                                text = String.format(Locale.US, "%.1f °C", primaryTemp.celsius),
+                                style = MaterialTheme.typography.headlineMedium.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = tempAccent
+                                )
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            // Bar suhu: skala 30-90 °C
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(6.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(DarkNavySurfaceVariant)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(((primaryTemp.celsius - 30f) / 60f).coerceIn(0.03f, 1f))
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(tempAccent)
+                                )
+                            }
+                            val others = temperatureData.readings.filter { it !== primaryTemp }
+                            if (others.isNotEmpty()) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                others.forEach { r ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(text = r.label, fontSize = 12.sp, color = TextSecondary)
+                                        Text(
+                                            text = String.format(Locale.US, "%.1f °C", r.celsius),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = tempColor(r.celsius)
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Di atas 65 °C modem bisa menurunkan kecepatan atau terputus. Beri ventilasi atau jauhkan dari sinar matahari langsung.",
+                                fontSize = 10.sp,
+                                color = TextMuted,
+                                lineHeight = 14.sp
+                            )
+                        }
+                        temperatureData.status == TempStatus.CHECKING -> {
+                            Text(
+                                text = "Membaca sensor suhu…",
+                                fontSize = 12.sp,
+                                color = TextSecondary
+                            )
+                        }
+                        else -> {
+                            Text(
+                                text = "Tidak tersedia",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextMuted
+                                )
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Firmware modem ini tidak mengirim data suhu lewat antarmuka HiLink. Aplikasi akan mencoba lagi otomatis tiap 1 menit.",
+                                fontSize = 11.sp,
+                                color = TextSecondary,
+                                lineHeight = 16.sp
+                            )
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
