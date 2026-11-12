@@ -49,9 +49,12 @@ data class SignalData(
     val rsrp: Int = -105,             // in dBm (-140 to -44)
     val rsrq: Int = -12,              // in dB (-20 to -3)
     val pci: Int = 0,                 // Physical Cell ID (Tower identification)
-    val cellId: String = "0",         // eNodeB Cell ID
+    val cellId: String = "0",         // Cell ID (ECI)
+    val enbId: String = "",           // eNodeB ID (kosong = tidak tersedia)
+    val tac: String = "",             // Tracking Area Code (kosong = tidak tersedia)
     val networkMode: String = "4G LTE",
-    val currentBand: String = "Band 3 (1800 MHz)",
+    /** ID band yang SEDANG dipakai modem saat ini, mis. "B40" (kosong = belum terbaca). */
+    val activeBandId: String = "",
     val timestamp: Long = System.currentTimeMillis(),
     val responseTimeMs: Long = 120L
 ) {
@@ -93,48 +96,6 @@ data class SignalData(
             rssi >= -85 -> "Cukup"
             else -> "Lemah"
         }
-}
-
-/** Satu pembacaan sensor suhu dari modem. */
-data class TempReading(
-    val label: String,       // mis. "Chipset (Balong)", "Baterai"
-    val celsius: Float,
-    val rawTag: String = ""  // nama tag XML asli, berguna untuk diagnosa
-)
-
-enum class TempStatus { CHECKING, AVAILABLE, UNAVAILABLE }
-
-/** Suhu modem (chipset Balong pada E5372). */
-data class TemperatureData(
-    val status: TempStatus = TempStatus.CHECKING,
-    val readings: List<TempReading> = emptyList(),
-    val source: String = "",
-    val timestamp: Long = System.currentTimeMillis()
-) {
-    /** Sensor utama: prioritas chipset/CPU/SoC, lalu PA, lalu yang tertinggi. */
-    val primary: TempReading?
-        get() = readings.firstOrNull { it.label.startsWith("Chipset") }
-            ?: readings.firstOrNull { it.label.startsWith("Power Amplifier") }
-            ?: readings.maxByOrNull { it.celsius }
-
-    val color: Color
-        get() = tempColor(primary?.celsius ?: 0f)
-
-    val label: String
-        get() = tempLabel(primary?.celsius ?: 0f)
-}
-
-fun tempColor(c: Float): Color = when {
-    c < 50f -> SignalGreen
-    c < 65f -> SignalOrange
-    else -> WarningRed
-}
-
-fun tempLabel(c: Float): String = when {
-    c < 50f -> "Normal"
-    c < 65f -> "Hangat"
-    c < 75f -> "Panas"
-    else -> "Sangat Panas"
 }
 
 data class SignalBarQuality(
@@ -190,62 +151,109 @@ data class BandOption(
     val maskHex: String
 ) {
     companion object {
-        val INDONESIA_BANDS = listOf(
-            BandOption(
-                id = "AUTO",
-                name = "Auto (Semua Band)",
-                frequency = "Otomatis",
-                maskHex = "7FFFFFFFFFFFFFFF"
-            ),
-            BandOption(
-                id = "B40",
-                name = "B40 2300 MHz",
-                frequency = "2300 MHz TDD",
-                maskHex = "8000000000"
-            ),
-            BandOption(
-                id = "B3",
-                name = "B3 1800 MHz",
-                frequency = "1800 MHz FDD",
-                maskHex = "4"
-            ),
-            BandOption(
-                id = "B1",
-                name = "B1 2100 MHz",
-                frequency = "2100 MHz FDD",
-                maskHex = "1"
-            ),
-            BandOption(
-                id = "B8",
-                name = "B8 900 MHz",
-                frequency = "900 MHz FDD",
-                maskHex = "80"
-            ),
-            BandOption(
-                id = "B5",
-                name = "B5 850 MHz",
-                frequency = "850 MHz FDD",
-                maskHex = "10"
-            ),
-            BandOption(
-                id = "B1_B3",
-                name = "B1 + B3 (2100 + 1800 MHz)",
-                frequency = "Dual Band CA",
-                maskHex = "5"
-            ),
-            BandOption(
-                id = "B3_B8",
-                name = "B3 + B8 (1800 + 900 MHz)",
-                frequency = "Dual Band CA",
-                maskHex = "84"
-            ),
-            BandOption(
-                id = "B3_B40",
-                name = "B3 + B40 (1800 + 2300 MHz)",
-                frequency = "FDD + TDD CA",
-                maskHex = "8000000004"
-            )
+        /** Mask "Auto" (semua band) yang dikirim ke modem. */
+        const val AUTO_MASK_HEX = "7FFFFFFFFFFFFFFF"
+
+        val AUTO = BandOption(
+            id = "AUTO",
+            name = "Auto (Semua Band)",
+            frequency = "Otomatis",
+            maskHex = AUTO_MASK_HEX
         )
+
+        /** Band yang bisa dihidup/matikan satu per satu (bit LTEBand di modem). */
+        val SINGLE_BANDS = listOf(
+            BandOption("B40", "B40 2300 MHz", "2300 MHz TDD", "8000000000"),
+            BandOption("B3", "B3 1800 MHz", "1800 MHz FDD", "4"),
+            BandOption("B1", "B1 2100 MHz", "2100 MHz FDD", "1"),
+            BandOption("B8", "B8 900 MHz", "900 MHz FDD", "80"),
+            BandOption("B5", "B5 850 MHz", "850 MHz FDD", "10")
+        )
+
+        /** Auto + semua band tunggal (dipertahankan agar kode/tes lama tetap berlaku). */
+        val INDONESIA_BANDS = listOf(AUTO) + SINGLE_BANDS
+
+        fun byId(id: String): BandOption? = SINGLE_BANDS.firstOrNull { it.id == id }
+
+        /** "B40" + "B3" -> mask gabungan (OR bit) dalam hex. */
+        fun maskFor(ids: Set<String>): String {
+            var mask = java.math.BigInteger.ZERO
+            for (id in ids) {
+                byId(id)?.let { mask = mask.or(java.math.BigInteger(it.maskHex, 16)) }
+            }
+            return mask.toString(16).uppercase()
+        }
+
+        /**
+         * Baca mask LTEBand dari modem -> pilihan band.
+         * Mask berisi seluruh band tunggal PLUS band lain (mis. 7FFFFFFFFFFFFFFF) dianggap Auto.
+         */
+        fun selectionFromMask(maskHex: String): BandSelection {
+            val mask = try {
+                java.math.BigInteger(maskHex.trim().removePrefix("0x").removePrefix("0X"), 16)
+            } catch (_: Exception) {
+                return BandSelection.AUTO
+            }
+            val known = SINGLE_BANDS.filter { !mask.and(java.math.BigInteger(it.maskHex, 16)).equals(java.math.BigInteger.ZERO) }
+                .map { it.id }.toSet()
+            var knownMask = java.math.BigInteger.ZERO
+            for (b in SINGLE_BANDS) knownMask = knownMask.or(java.math.BigInteger(b.maskHex, 16))
+            val hasOthers = !mask.andNot(knownMask).equals(java.math.BigInteger.ZERO)
+            return if (known.size == SINGLE_BANDS.size && hasOthers) BandSelection.AUTO
+            else BandSelection(isAuto = false, ids = known)
+        }
+
+        /** Nomor band LTE dari EARFCN downlink (hanya band yang dipakai di Indonesia). */
+        fun bandIdFromEarfcn(earfcn: Int): String = when (earfcn) {
+            in 0..599 -> "B1"
+            in 1200..1949 -> "B3"
+            in 2400..2649 -> "B5"
+            in 3450..3799 -> "B8"
+            in 38650..39649 -> "B40"
+            else -> ""
+        }
+    }
+}
+
+/**
+ * Band yang diizinkan modem. isAuto = true -> modem bebas memilih (semua band tunggal tampil menyala).
+ */
+data class BandSelection(
+    val isAuto: Boolean,
+    val ids: Set<String>
+) {
+    /** Teks ringkas untuk kartu: "Auto (Semua Band)" atau "B40 2300 MHz + B3 1800 MHz". */
+    val label: String
+        get() = when {
+            isAuto -> BandOption.AUTO.name
+            ids.isEmpty() -> "Band lain"
+            else -> BandOption.SINGLE_BANDS.filter { it.id in ids }.joinToString(" + ") { it.name }
+        }
+
+    /** Teks sangat ringkas: "AUTO" atau "B40+B3". */
+    val shortLabel: String
+        get() = when {
+            isAuto -> "AUTO"
+            ids.isEmpty() -> "-"
+            else -> BandOption.SINGLE_BANDS.filter { it.id in ids }.joinToString("+") { it.id }
+        }
+
+    /** Mask yang dikirim ke modem untuk pilihan ini. */
+    val maskHex: String
+        get() = if (isAuto) BandOption.AUTO_MASK_HEX else BandOption.maskFor(ids)
+
+    /** Band tunggal yang boleh dipakai modem (Auto = semuanya). */
+    val allowedIds: Set<String>
+        get() = if (isAuto) BandOption.SINGLE_BANDS.map { it.id }.toSet() else ids
+
+    /** Saklar satu band. Dari Auto, semua band dianggap menyala lalu band yang ditekan dimatikan. */
+    fun toggled(id: String): BandSelection {
+        val next = if (id in allowedIds) allowedIds - id else allowedIds + id
+        return BandSelection(isAuto = false, ids = next)
+    }
+
+    companion object {
+        val AUTO = BandSelection(isAuto = true, ids = BandOption.SINGLE_BANDS.map { it.id }.toSet())
     }
 }
 

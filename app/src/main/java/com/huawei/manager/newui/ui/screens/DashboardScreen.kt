@@ -652,14 +652,14 @@ fun DashboardScreen(
                             Spacer(modifier = Modifier.width(10.dp))
                             Column {
                                 Text(
-                                    text = "Frekuensi Band Terkunci",
+                                    text = "Band Diizinkan",
                                     style = MaterialTheme.typography.labelSmall.copy(
                                         color = TextMuted,
                                         fontWeight = FontWeight.Medium
                                     )
                                 )
                                 Text(
-                                    text = selectedBand.name,
+                                    text = selectedBand.label,
                                     style = MaterialTheme.typography.bodyMedium.copy(
                                         fontWeight = FontWeight.Bold,
                                         color = TextPrimary
@@ -675,7 +675,7 @@ fun DashboardScreen(
                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                         ) {
                             Text(
-                                text = selectedBand.id,
+                                text = selectedBand.shortLabel,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = ElectricBlue
@@ -1175,8 +1175,9 @@ fun DashboardScreen(
         // Dialogs
         if (showBandDialog) {
             BandSelectorDialog(
-                selectedBand = selectedBand,
-                onSelectBand = { viewModel.selectBand(it) },
+                selection = selectedBand,
+                onSelectAuto = { viewModel.selectAutoBand() },
+                onToggleBand = { viewModel.toggleBand(it) },
                 onDismiss = { viewModel.closeBandDialog() }
             )
         }

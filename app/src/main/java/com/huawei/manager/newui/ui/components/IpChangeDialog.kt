@@ -8,6 +8,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -257,40 +258,47 @@ fun IpChangeDialog(
 
                         Spacer(modifier = Modifier.height(20.dp))
 
-                        Row(
+                        Column(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             OutlinedButton(
                                 onClick = onRetry,
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .fillMaxWidth()
                                     .height(48.dp)
                                     .testTag("retry_ip_change_button"),
-                                shape = RoundedCornerShape(12.dp)
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Autorenew,
                                     contentDescription = null,
                                     modifier = Modifier.size(18.dp)
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Ganti Lagi", fontSize = 13.sp)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Ganti IP Lagi",
+                                    fontSize = 14.sp,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
                             }
 
                             Button(
                                 onClick = onDismiss,
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .fillMaxWidth()
                                     .height(48.dp)
                                     .testTag("done_ip_change_button"),
                                 shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 0.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = ElectricBlue,
                                     contentColor = DarkNavySurface
                                 )
                             ) {
-                                Text("Selesai", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                Text("Selesai", fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1)
                             }
                         }
                     }

@@ -3,14 +3,12 @@ package com.huawei.manager.newui.network
 import android.util.Base64
 import android.util.Log
 import com.huawei.manager.newui.model.BandOption
+import com.huawei.manager.newui.model.BandSelection
 import com.huawei.manager.newui.model.BlockedDevice
 import com.huawei.manager.newui.model.ConnectedDevice
 import com.huawei.manager.newui.model.ConnectionState
 import com.huawei.manager.newui.model.NetworkStatus
 import com.huawei.manager.newui.model.SignalData
-import com.huawei.manager.newui.model.TempReading
-import com.huawei.manager.newui.model.TempStatus
-import com.huawei.manager.newui.model.TemperatureData
 import com.huawei.manager.newui.model.TrafficData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -64,8 +62,8 @@ class HilinkModemService {
     private var realDeviceModel: String = ""
     private var realFirmware: String = ""
     private var realWanIp: String = ""
-    private var detectedBand: BandOption = BandOption.INDONESIA_BANDS[0]
-    private var detectedBandName: String = "Auto Band"
+    private var lastWanProbeMs = 0L
+    private var detectedSelection: BandSelection = BandSelection.AUTO
     private var realOperator: String = ""
 
     // Simulation fallback only if user explicitly starts Demo Mode
@@ -74,18 +72,13 @@ class HilinkModemService {
     private var simPci = 142
     private var simCellId = "1589412"
     private var simWanIp = "10.165.74.82"
-    private var simCurrentBand = "Band 3 (1800 MHz)"
+    private var simActiveBandId = "B3"
     private var simBandwidth = "20 MHz (FDD LTE)"
     private var simOperator = "Telkomsel"
     private var simMonthDownload = 18_420_000_000L
     private var simMonthUpload = 4_230_000_000L
     private var antennaAngleDegrees = 45f
     private var antennaSweepDirection = 1
-    private var simTemp = 47f
-
-    // Pemantauan suhu: endpoint yang terbukti memberi data suhu disimpan agar polling berikutnya hanya 1 request
-    private var tempEndpoint: String? = null
-    private var lastTempProbeMs = 0L
 
     suspend fun checkConnection(
         gatewayIp: String,
@@ -321,6 +314,14 @@ class HilinkModemService {
                 val rsrq = parseDb(extractXmlTag(xmlContent, "rsrq"), default = -9)
                 val pci = extractXmlTag(xmlContent, "pci")?.trim()?.toIntOrNull() ?: 0
                 val cellId = extractXmlTag(xmlContent, "cell_id")?.trim() ?: "0"
+                val tac = extractXmlTag(xmlContent, "tac")?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "0" && it != "65535" }.orEmpty()
+                val enbId = extractXmlTag(xmlContent, "enodeb_id")?.trim()
+                    ?.takeIf { it.isNotBlank() && it != "0" } ?: enbFromCellId(cellId)
+                val activeBandId = parseActiveBandId(
+                    extractXmlTag(xmlContent, "band"),
+                    extractXmlTag(xmlContent, "earfcn")
+                )
                 val mode = extractXmlTag(xmlContent, "mode")?.trim() ?: "4G LTE"
 
                 val signalData = SignalData(
@@ -330,8 +331,10 @@ class HilinkModemService {
                     rsrq = rsrq,
                     pci = pci,
                     cellId = cellId,
+                    enbId = enbId,
+                    tac = tac,
                     networkMode = if (mode == "7" || mode == "9" || mode == "19") "4G LTE" else mode,
-                    currentBand = detectedBandName,
+                    activeBandId = activeBandId,
                     timestamp = System.currentTimeMillis(),
                     responseTimeMs = elapsedMs
                 )
@@ -344,108 +347,25 @@ class HilinkModemService {
         }
     }
 
-    // ------------------------------------------------------------------------------------
-    // Suhu chipset (Balong pada E5372)
-    // ------------------------------------------------------------------------------------
-
-    private val tempCandidateEndpoints = listOf(
-        "api/device/information",
-        "api/device/signal",
-        "api/monitoring/status",
-        "api/device/boardinfo",
-        "api/monitoring/converged-status",
-        "api/device/basic_information",
-        "api/monitoring/check-notifications",
-        "api/device/antenna_status"
-    )
-
-    private val tempTagRegex = Regex("<([A-Za-z0-9_]*[Tt][Ee][Mm][Pp][A-Za-z0-9_]*)>([^<]*)</\\1>")
-
-    private fun tempLabelFor(tag: String): String {
-        val t = tag.lowercase()
-        return when {
-            t.contains("battery") || t.contains("batt") -> "Baterai"
-            t.contains("chip") || t.contains("cpu") || t.contains("soc") || t.contains("balong") -> "Chipset (Balong)"
-            t.contains("pa") && !t.contains("pap") -> "Power Amplifier"
-            t.contains("sim") -> "SIM"
-            t.contains("board") -> "Board"
-            else -> tag
-        }
+    /** eNodeB ID = Cell ID (ECI 28 bit) dibagi 256. Kosong bila Cell ID tidak masuk akal. */
+    private fun enbFromCellId(cellId: String): String {
+        val v = cellId.trim().toLongOrNull() ?: cellId.trim().toLongOrNull(16) ?: return ""
+        return if (v > 255L) (v shr 8).toString() else ""
     }
 
-    /** Ubah nilai mentah modem ke derajat Celsius. Mengembalikan null jika tidak masuk akal. */
-    private fun normalizeTemp(raw: String): Float? {
-        val v = raw.replace("°", "").replace("℃", "").replace("C", "", ignoreCase = true).trim().toFloatOrNull()
-            ?: return null
-        val c = if (v > 200f) v / 10f else v   // sebagian firmware memakai satuan 0,1 °C (mis. 452 -> 45,2)
-        return if (c in 1f..150f && c != 255f) c else null
-    }
-
-    private fun parseTempReadings(xml: String): List<TempReading> =
-        tempTagRegex.findAll(xml).mapNotNull { m ->
-            val tag = m.groupValues[1]
-            if (tag.contains("template", ignoreCase = true)) return@mapNotNull null
-            val c = normalizeTemp(m.groupValues[2]) ?: return@mapNotNull null
-            TempReading(label = tempLabelFor(tag), celsius = c, rawTag = tag)
-        }.distinctBy { it.label to it.celsius }.toList()
-
-    private fun readTempFrom(gatewayIp: String, path: String): List<TempReading> {
-        return try {
-            val body = client.newCall(buildRequest("http://$gatewayIp/$path").get().build())
-                .execute().use { it.body?.string() }
-            if (body == null || !body.contains("<response>") || isLoginError(body)) emptyList()
-            else parseTempReadings(body)
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
-    /**
-     * Membaca suhu modem. Tidak semua firmware HiLink mengekspos sensor suhu, jadi:
-     * - pertama kali, semua endpoint kandidat dicoba lalu endpoint yang berhasil diingat;
-     * - bila tidak ada yang punya data suhu, pencarian ulang hanya tiap 60 detik (tidak membebani modem).
-     * Kegagalan di sini tidak pernah memengaruhi status koneksi modem.
-     */
-    suspend fun fetchTemperature(gatewayIp: String, isDemoMode: Boolean): TemperatureData = withContext(Dispatchers.IO) {
-        if (isDemoMode) {
-            simTemp = (simTemp + Random.nextFloat() * 1.2f - 0.55f).coerceIn(38f, 72f)
-            return@withContext TemperatureData(
-                status = TempStatus.AVAILABLE,
-                readings = listOf(
-                    TempReading("Chipset (Balong)", (simTemp * 10).toInt() / 10f),
-                    TempReading("Baterai", ((simTemp - 12f) * 10).toInt() / 10f)
-                ),
-                source = "demo"
-            )
-        }
-
-        try {
-            tempEndpoint?.let { path ->
-                val r = readTempFrom(gatewayIp, path)
-                if (r.isNotEmpty()) return@withContext TemperatureData(TempStatus.AVAILABLE, r, path)
-                tempEndpoint = null   // endpoint berhenti memberi data -> cari ulang
+    /** Band yang sedang dipakai: dari tag <band>, kalau tidak ada dari EARFCN. Hasil mis. "B40" atau "". */
+    private fun parseActiveBandId(bandRaw: String?, earfcnRaw: String?): String {
+        bandRaw?.let { raw ->
+            Regex("(\\d+)").find(raw)?.groupValues?.get(1)?.let { n ->
+                BandOption.byId("B$n")?.let { return it.id }
             }
-
-            val now = System.currentTimeMillis()
-            if (lastTempProbeMs != 0L && now - lastTempProbeMs < 60_000L) {
-                return@withContext TemperatureData(TempStatus.UNAVAILABLE)
-            }
-            lastTempProbeMs = now
-
-            val found = LinkedHashMap<String, TempReading>()
-            var source = ""
-            for (path in tempCandidateEndpoints) {
-                val r = readTempFrom(gatewayIp, path)
-                if (r.isNotEmpty()) {
-                    if (tempEndpoint == null) { tempEndpoint = path; source = path }
-                    r.forEach { found.putIfAbsent(it.label, it) }
-                }
-            }
-            if (found.isEmpty()) TemperatureData(TempStatus.UNAVAILABLE)
-            else TemperatureData(TempStatus.AVAILABLE, found.values.toList(), source)
-        } catch (_: Exception) {
-            TemperatureData(TempStatus.UNAVAILABLE)
         }
+        earfcnRaw?.let { raw ->
+            val n = Regex("DL\\D*(\\d+)", RegexOption.IGNORE_CASE).find(raw)?.groupValues?.get(1)
+                ?: Regex("(\\d+)").find(raw)?.groupValues?.get(1)
+            n?.toIntOrNull()?.let { return BandOption.bandIdFromEarfcn(it) }
+        }
+        return ""
     }
 
     suspend fun fetchTrafficData(
@@ -570,7 +490,7 @@ class HilinkModemService {
                 val users = maxOf(statusWifiUsers, hostUsers).coerceAtLeast(1)
 
                 // 3. WAN IP: inspect all endpoints so it's NEVER empty
-                val wanIp = fetchWanIp(gatewayIp)
+                val wanIp = fetchWanIp(gatewayIp, xml)
 
                 // 4. Nama model dibaca otomatis dari modem (ulangi bila sebelumnya gagal terbaca)
                 if (realDeviceModel.isBlank()) fetchDeviceInformation(gatewayIp)
@@ -579,9 +499,9 @@ class HilinkModemService {
                     NetworkStatus(
                         operator = operator,
                         signalBars = bars.coerceIn(0, 5),
-                        wanIp = wanIp.ifBlank { "10.158.42.119" },
+                        wanIp = wanIp,
                         gatewayIp = gatewayIp,
-                        bandwidth = detectedBand.frequency,
+                        bandwidth = detectedSelection.label,
                         connectionState = ConnectionState.CONNECTED,
                         batteryPercent = battery,
                         wifiUsers = users,
@@ -762,50 +682,22 @@ class HilinkModemService {
     }
 
     /**
-     * Detects which LTE band is currently locked/active on modem
+     * Membaca band yang DIIZINKAN di modem (mask LTEBand pada net-mode).
+     * Band yang sedang benar-benar dipakai dibaca realtime dari data sinyal (lihat activeBandId).
      */
-    suspend fun detectActiveBand(gatewayIp: String): BandOption = withContext(Dispatchers.IO) {
+    suspend fun detectActiveBand(gatewayIp: String): BandSelection = withContext(Dispatchers.IO) {
         try {
-            val url = "http://$gatewayIp/api/net/net-mode"
-            val req = buildRequest(url).get().build()
-            val res = client.newCall(req).execute()
-            val xml = res.body?.string()
-
-            if (res.isSuccessful && xml != null && xml.contains("<LTEBand>")) {
-                val lteBandHex = extractXmlTag(xml, "LTEBand")?.trim()?.uppercase() ?: ""
-                val matched = BandOption.INDONESIA_BANDS.firstOrNull {
-                    it.maskHex.equals(lteBandHex, ignoreCase = true)
-                }
-                if (matched != null) {
-                    detectedBand = matched
-                    detectedBandName = matched.name
-                    return@withContext matched
-                }
-            }
-
-            // Also check /api/device/signal for band info
-            val sigUrl = "http://$gatewayIp/api/device/signal"
-            val resSig = client.newCall(buildRequest(sigUrl).get().build()).execute()
-            val sigXml = resSig.body?.string()
-            if (sigXml != null) {
-                val bandTag = extractXmlTag(sigXml, "band") ?: extractXmlTag(sigXml, "workmode") ?: ""
-                val matched = when {
-                    bandTag.contains("3") || bandTag.contains("1800") -> BandOption.INDONESIA_BANDS.first { it.id == "B3" }
-                    bandTag.contains("1") || bandTag.contains("2100") -> BandOption.INDONESIA_BANDS.first { it.id == "B1" }
-                    bandTag.contains("8") || bandTag.contains("900") -> BandOption.INDONESIA_BANDS.first { it.id == "B8" }
-                    bandTag.contains("40") || bandTag.contains("2300") -> BandOption.INDONESIA_BANDS.first { it.id == "B40" }
-                    bandTag.contains("5") || bandTag.contains("850") -> BandOption.INDONESIA_BANDS.first { it.id == "B5" }
-                    else -> BandOption.INDONESIA_BANDS[0]
-                }
-                detectedBand = matched
-                detectedBandName = matched.name
-                return@withContext matched
+            val xml = client.newCall(buildRequest("http://$gatewayIp/api/net/net-mode").get().build())
+                .execute().use { it.body?.string() }
+            if (xml != null && xml.contains("<LTEBand>")) {
+                val hex = extractXmlTag(xml, "LTEBand")?.trim().orEmpty()
+                if (hex.isNotBlank()) detectedSelection = BandOption.selectionFromMask(hex)
             }
         } catch (_: Exception) {}
-        return@withContext detectedBand
+        detectedSelection
     }
 
-    fun getCurrentlyDetectedBand(): BandOption = detectedBand
+    fun getCurrentSelection(): BandSelection = detectedSelection
 
     private val modelRegex = Regex("[A-Z]{1,2}\\d{3,4}[a-z]?(?:-\\d{2,3})?")
 
@@ -839,7 +731,6 @@ class HilinkModemService {
                 }
                 extractXmlTag(body, "SoftwareVersion")?.takeIf { it.isNotBlank() }
                     ?.let { realFirmware = it }
-                extractXmlTag(body, "WanIPAddress")?.let { if (it.isNotBlank()) realWanIp = it }
             } catch (_: Exception) {}
         }
         if (realDeviceModel.isBlank() && fallbackName != null) realDeviceModel = normalizeModelName(fallbackName!!)
@@ -879,58 +770,62 @@ class HilinkModemService {
         return if (name.startsWith("Huawei", ignoreCase = true)) name else "Huawei $name"
     }
 
+    /** IPv4 valid, bukan 0.0.0.0 / loopback / alamat LAN modem. */
+    private fun isUsableWanIp(ip: String?, gatewayIp: String): Boolean {
+        if (ip.isNullOrBlank()) return false
+        val parts = ip.trim().split(".")
+        if (parts.size != 4) return false
+        val nums = parts.map { it.toIntOrNull() ?: return false }
+        if (nums.any { it !in 0..255 }) return false
+        if (nums.all { it == 0 } || nums[0] == 127 || nums[0] >= 224) return false
+        val gwPrefix = gatewayIp.substringBeforeLast(".", "")
+        if (ip.trim() == gatewayIp || (gwPrefix.isNotEmpty() && ip.trim().startsWith("$gwPrefix."))) return false
+        return true
+    }
+
+    /** Ambil WAN IP dari tag XML yang memang berisi IP WAN. TIDAK menebak angka berformat IP di sembarang tempat. */
+    private fun wanIpFromXml(xml: String?, gatewayIp: String): String? {
+        if (xml.isNullOrBlank()) return null
+        for (tag in listOf("WanIPAddress", "wan_ip_address", "ExternalIPAddress")) {
+            val ip = extractXmlTag(xml, tag)
+            if (isUsableWanIp(ip, gatewayIp)) return ip!!.trim()
+        }
+        return null
+    }
+
     /**
-     * Finds WAN IP across all Huawei endpoints and IPv4 tags
+     * WAN IP (alamat internet) modem. Memakai XML status yang sudah diambil bila ada (tanpa request tambahan),
+     * jika tidak ada, endpoint lain dicoba paling sering tiap 5 detik. Mengembalikan "" bila belum ada IP.
      */
-    private suspend fun fetchWanIp(gatewayIp: String): String {
-        if (realWanIp.isNotBlank()) return realWanIp
+    private fun fetchWanIp(gatewayIp: String, statusXml: String? = null, force: Boolean = false): String {
+        wanIpFromXml(statusXml, gatewayIp)?.let { realWanIp = it; return it }
+
+        val now = System.currentTimeMillis()
+        if (!force && realWanIp.isNotBlank() && now - lastWanProbeMs < 5_000L) return realWanIp
+        lastWanProbeMs = now
 
         val endpoints = listOf(
-            "http://$gatewayIp/api/monitoring/converged-status",
-            "http://$gatewayIp/api/device/information",
-            "http://$gatewayIp/api/dialup/connection",
             "http://$gatewayIp/api/monitoring/status",
-            "http://$gatewayIp/api/device/signal"
+            "http://$gatewayIp/api/monitoring/converged-status",
+            "http://$gatewayIp/api/device/information"
         )
-
         for (url in endpoints) {
             try {
-                val req = buildRequest(url).get().build()
-                val res = client.newCall(req).execute()
-                val body = res.body?.string()
-                if (res.isSuccessful && !body.isNullOrBlank()) {
-                    val ip = extractXmlTag(body, "WanIPAddress")
-                        ?: extractXmlTag(body, "wan_ip_address")
-                        ?: extractXmlTag(body, "ExternalIPAddress")
-                        ?: extractXmlTag(body, "ip_address")
-
-                    if (!ip.isNullOrBlank() && ip != "0.0.0.0" && !ip.startsWith("192.168.")) {
-                        realWanIp = ip
-                        return ip
-                    }
-
-                    // Regex search for non-local IPv4
-                    val matcher = Pattern.compile("\\b(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\b").matcher(body)
-                    while (matcher.find()) {
-                        val candidate = matcher.group(1)
-                        if (candidate != null && !candidate.startsWith("192.168.") && candidate != "0.0.0.0" && candidate != "127.0.0.1" && !candidate.startsWith("255.")) {
-                            realWanIp = candidate
-                            return candidate
-                        }
-                    }
-                }
+                val body = client.newCall(buildRequest(url).get().build()).execute().use { it.body?.string() }
+                wanIpFromXml(body, gatewayIp)?.let { realWanIp = it; return it }
             } catch (_: Exception) {}
         }
-        return realWanIp
+        // Modem terhubung tapi data seluler sedang putus -> jangan tampilkan IP lama
+        realWanIp = ""
+        return ""
     }
 
     suspend fun executeChangeIp(
         gatewayIp: String,
         isDemoMode: Boolean
     ): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
-        val oldIp = if (isDemoMode) simWanIp else (realWanIp.ifBlank { "10.165.74.82" })
-
         if (isDemoMode) {
+            val oldIp = simWanIp
             val ipPools = listOf(
                 "10.${Random.nextInt(150, 190)}.${Random.nextInt(1, 254)}.${Random.nextInt(2, 254)}",
                 "114.124.${Random.nextInt(1, 254)}.${Random.nextInt(2, 254)}",
@@ -943,6 +838,8 @@ class HilinkModemService {
 
         try {
             refreshToken(gatewayIp)
+            // IP lama = IP internet yang benar-benar aktif sebelum data diputus
+            val oldIp = fetchWanIp(gatewayIp, force = true)
             val mediaType = "application/xml; charset=UTF-8".toMediaType()
 
             // 1. Mobile data disconnect
@@ -950,7 +847,7 @@ class HilinkModemService {
             val offReq = buildRequest("http://$gatewayIp/api/dialup/mobile-dataswitch")
                 .post(turnOffXml.toRequestBody(mediaType))
                 .build()
-            client.newCall(offReq).execute()
+            client.newCall(offReq).execute().close()
 
             kotlinx.coroutines.delay(2000)
 
@@ -961,55 +858,61 @@ class HilinkModemService {
             val onReq = buildRequest("http://$gatewayIp/api/dialup/mobile-dataswitch")
                 .post(turnOnXml.toRequestBody(mediaType))
                 .build()
-            client.newCall(onReq).execute()
+            client.newCall(onReq).execute().close()
 
+            // 3. Tunggu operator memberi IP baru (maks. ~15 detik)
             kotlinx.coroutines.delay(3000)
-
-            realWanIp = ""
-            val newIp = fetchWanIp(gatewayIp)
-            Result.success(Pair(oldIp, newIp))
+            var newIp = ""
+            for (attempt in 1..8) {
+                newIp = fetchWanIp(gatewayIp, force = true)
+                if (newIp.isNotBlank() && newIp != oldIp) break
+                kotlinx.coroutines.delay(1500)
+            }
+            if (newIp.isBlank()) {
+                return@withContext Result.failure(IOException("Data seluler tersambung kembali, tetapi IP baru belum diterima. Coba lagi."))
+            }
+            Result.success(Pair(oldIp.ifBlank { "-" }, newIp))
         } catch (e: Exception) {
             Log.e("HilinkService", "executeChangeIp error", e)
             Result.failure(e)
         }
     }
 
-    suspend fun executeBandLock(
+    /** Terapkan pilihan band (mask LTEBand gabungan) ke modem. */
+    suspend fun executeBandSelection(
         gatewayIp: String,
-        band: BandOption,
+        selection: BandSelection,
         isDemoMode: Boolean
     ): Result<String> = withContext(Dispatchers.IO) {
-        detectedBand = band
-        detectedBandName = band.name
+        detectedSelection = selection
 
         if (isDemoMode) {
-            simCurrentBand = band.name
-            return@withContext Result.success("Berhasil mengunci frekuensi ${band.name}")
+            simActiveBandId = selection.allowedIds.firstOrNull { it == simActiveBandId }
+                ?: BandOption.SINGLE_BANDS.firstOrNull { it.id in selection.allowedIds }?.id.orEmpty()
+            return@withContext Result.success("Band diperbarui: ${selection.label}")
         }
 
         try {
             refreshToken(gatewayIp)
-            val xmlPayload = """
-                <request>
-                    <NetworkMode>00</NetworkMode>
-                    <NetworkBand>3FFFFFFF</NetworkBand>
-                    <LTEBand>${band.maskHex}</LTEBand>
-                </request>
-            """.trimIndent()
+            val xmlPayload = "<request>" +
+                "<NetworkMode>00</NetworkMode>" +
+                "<NetworkBand>3FFFFFFF</NetworkBand>" +
+                "<LTEBand>${selection.maskHex}</LTEBand>" +
+                "</request>"
 
             val mediaType = "application/xml; charset=UTF-8".toMediaType()
             val req = buildRequest("http://$gatewayIp/api/net/net-mode")
                 .post(xmlPayload.toRequestBody(mediaType))
                 .build()
 
-            val res = client.newCall(req).execute()
-            if (res.isSuccessful) {
-                Result.success("Modem berhasil berpindah ke ${band.name}")
+            val (ok, body) = client.newCall(req).execute().use { it.isSuccessful to it.body?.string() }
+            if (ok && body?.contains("<error>") != true) {
+                Result.success("Band diperbarui: ${selection.label}")
             } else {
-                Result.failure(IOException("Gagal mengatur band (HTTP ${res.code})"))
+                Result.failure(IOException("Modem menolak pengaturan band"))
             }
         } catch (e: Exception) {
-            Log.e("HilinkService", "executeBandLock error", e)
+            Log.e("HilinkService", "executeBandSelection error", e)
             Result.failure(e)
         }
     }
@@ -1316,8 +1219,10 @@ class HilinkModemService {
             rsrq = rsrq,
             pci = simPci,
             cellId = simCellId,
+            enbId = enbFromCellId(simCellId),
+            tac = "12345",
             networkMode = "4G LTE",
-            currentBand = simCurrentBand,
+            activeBandId = simActiveBandId,
             timestamp = System.currentTimeMillis(),
             responseTimeMs = Random.nextLong(45, 115)
         )

@@ -13,8 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -26,6 +24,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.huawei.manager.newui.model.BandOption
+import com.huawei.manager.newui.model.BandSelection
 import com.huawei.manager.newui.ui.theme.DarkNavySurface
 import com.huawei.manager.newui.ui.theme.DarkNavySurfaceElevated
 import com.huawei.manager.newui.ui.theme.DarkNavySurfaceVariant
@@ -47,8 +48,9 @@ import com.huawei.manager.newui.ui.theme.TextSecondary
 
 @Composable
 fun BandSelectorDialog(
-    selectedBand: BandOption,
-    onSelectBand: (BandOption) -> Unit,
+    selection: BandSelection,
+    onSelectAuto: () -> Unit,
+    onToggleBand: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -94,7 +96,7 @@ fun BandSelectorDialog(
                                 )
                             )
                             Text(
-                                text = "Pilih frekuensi pengunci modem",
+                                text = "Hidupkan / matikan band sesukamu",
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     color = TextSecondary,
                                     fontSize = 11.sp
@@ -117,105 +119,34 @@ fun BandSelectorDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // List of clean bands (Rentang MHz saja)
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f, fill = false),
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(BandOption.INDONESIA_BANDS) { band ->
-                        val isSelected = band.id == selectedBand.id
-
-                        val itemBg = if (isSelected) {
-                            ElectricBlue.copy(alpha = 0.15f)
-                        } else {
-                            DarkNavySurfaceVariant
-                        }
-
-                        val itemBorder = if (isSelected) {
-                            ElectricBlue
-                        } else {
-                            DarkNavySurfaceElevated.copy(alpha = 0.5f)
-                        }
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(itemBg)
-                                .border(1.dp, itemBorder, RoundedCornerShape(12.dp))
-                                .clickable { onSelectBand(band) }
-                                .padding(horizontal = 14.dp, vertical = 12.dp)
-                                .testTag("band_item_${band.id}"),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(34.dp)
-                                        .clip(CircleShape)
-                                        .background(
-                                            if (isSelected) ElectricBlue else DarkNavySurfaceElevated
-                                        ),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    if (isSelected) {
-                                        Icon(
-                                            imageVector = Icons.Default.Check,
-                                            contentDescription = "Terpilih",
-                                            tint = DarkNavySurface,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    } else {
-                                        Icon(
-                                            imageVector = Icons.Default.CellTower,
-                                            contentDescription = null,
-                                            tint = TextSecondary,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.width(12.dp))
-
-                                Text(
-                                    text = band.name,
-                                    style = MaterialTheme.typography.bodyMedium.copy(
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isSelected) ElectricBlue else TextPrimary,
-                                        fontSize = 14.sp
-                                    )
-                                )
-                            }
-
-                            if (isSelected) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(ElectricBlue.copy(alpha = 0.2f))
-                                        .padding(horizontal = 8.dp, vertical = 3.dp)
-                                ) {
-                                    Text(
-                                        text = "AKTIF",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = ElectricBlue
-                                    )
-                                }
-                            }
-                        }
+                    // Auto: semua band diizinkan
+                    BandRow(
+                        title = BandOption.AUTO.name,
+                        on = selection.isAuto,
+                        tag = "band_item_AUTO",
+                        isSwitch = false,
+                        onClick = onSelectAuto
+                    )
+                    // Saklar per band
+                    BandOption.SINGLE_BANDS.forEach { band ->
+                        BandRow(
+                            title = band.name,
+                            on = !selection.isAuto && band.id in selection.ids,
+                            tag = "band_item_${band.id}",
+                            isSwitch = true,
+                            onClick = { onToggleBand(band.id) }
+                        )
                     }
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "*Mengunci frekuensi tertentu memastikan modem tidak melompat antar frekuensi BTS.",
+                    text = "*Minimal satu band harus tetap menyala. Perubahan langsung diterapkan ke modem.",
                     style = MaterialTheme.typography.labelSmall.copy(
                         color = TextMuted,
                         fontSize = 10.sp,
@@ -223,6 +154,66 @@ fun BandSelectorDialog(
                     )
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun BandRow(
+    title: String,
+    on: Boolean,
+    tag: String,
+    isSwitch: Boolean,
+    onClick: () -> Unit
+) {
+    val bg = if (on) ElectricBlue.copy(alpha = 0.15f) else DarkNavySurfaceVariant
+    val border = if (on) ElectricBlue else DarkNavySurfaceElevated.copy(alpha = 0.5f)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(bg)
+            .border(1.dp, border, RoundedCornerShape(12.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .testTag(tag),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(if (on) ElectricBlue else DarkNavySurfaceElevated),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (on) Icons.Default.Check else Icons.Default.CellTower,
+                    contentDescription = null,
+                    tint = if (on) DarkNavySurface else TextSecondary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = if (on) FontWeight.Bold else FontWeight.Medium,
+                    color = if (on) ElectricBlue else TextPrimary,
+                    fontSize = 14.sp
+                )
+            )
+        }
+        if (isSwitch) {
+            Switch(
+                checked = on,
+                onCheckedChange = { onClick() },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = DarkNavySurface,
+                    checkedTrackColor = ElectricBlue
+                )
+            )
         }
     }
 }

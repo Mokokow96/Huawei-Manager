@@ -3,7 +3,7 @@ package com.huawei.manager.newui.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.huawei.manager.newui.model.BandOption
+import com.huawei.manager.newui.model.BandSelection
 import com.huawei.manager.newui.model.BlockedDevice
 import com.huawei.manager.newui.model.ConnectedDevice
 import com.huawei.manager.newui.model.LinkState
@@ -11,7 +11,6 @@ import com.huawei.manager.newui.model.ConnectionState
 import com.huawei.manager.newui.model.IpChangeProgress
 import com.huawei.manager.newui.model.NetworkStatus
 import com.huawei.manager.newui.model.SignalData
-import com.huawei.manager.newui.model.TemperatureData
 import com.huawei.manager.newui.model.TrafficData
 import com.huawei.manager.newui.network.HilinkModemService
 import com.huawei.manager.newui.network.WifiNetworkHelper
@@ -24,6 +23,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 enum class AppScreen {
     LOGIN,
@@ -84,16 +85,15 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
     private val _signalData = MutableStateFlow(SignalData())
     val signalData: StateFlow<SignalData> = _signalData.asStateFlow()
 
-    private val _temperatureData = MutableStateFlow(TemperatureData())
-    val temperatureData: StateFlow<TemperatureData> = _temperatureData.asStateFlow()
-    private var lastTempFetchMs = 0L
-
     private val _trafficData = MutableStateFlow(TrafficData())
     val trafficData: StateFlow<TrafficData> = _trafficData.asStateFlow()
 
     // Band Selector & IP Change State
-    private val _selectedBand = MutableStateFlow(BandOption.INDONESIA_BANDS[0])
-    val selectedBand: StateFlow<BandOption> = _selectedBand.asStateFlow()
+    private val _selectedBand = MutableStateFlow(BandSelection.AUTO)
+    val selectedBand: StateFlow<BandSelection> = _selectedBand.asStateFlow()
+
+    private var bandApplyJob: Job? = null
+    private val bandMutex = Mutex()
 
     private val _showBandDialog = MutableStateFlow(false)
     val showBandDialog: StateFlow<Boolean> = _showBandDialog.asStateFlow()
@@ -251,8 +251,7 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
                 _modemPreview.value = Pair(prefs.lastModel, prefs.lastFirmware)
 
                 // Read detected active band from modem
-                val activeBand = modemService.getCurrentlyDetectedBand()
-                _selectedBand.value = activeBand
+                _selectedBand.value = modemService.getCurrentSelection()
 
                 _networkStatus.value = _networkStatus.value.copy(
                     gatewayIp = ip,
@@ -281,8 +280,8 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
         modemService.fetchSignalData(ip, demo).getOrNull()?.let { _signalData.value = it }
         modemService.fetchTrafficData(ip, demo).getOrNull()?.let { _trafficData.value = it }
         modemService.fetchNetworkStatus(ip, demo).getOrNull()?.let { _networkStatus.value = it }
-        val activeBand = modemService.getCurrentlyDetectedBand()
-        _selectedBand.value = activeBand
+        // Jangan timpa pilihan band yang masih menunggu diterapkan ke modem
+        if (bandApplyJob?.isActive != true) _selectedBand.value = modemService.getCurrentSelection()
 
         if (!demo) {
             syncDataLimitFromModem(ip)
@@ -333,7 +332,6 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openSignalHunter() {
         _currentScreen.value = AppScreen.SIGNAL_HUNTER
-        lastTempFetchMs = 0L
         _sessionMaxSinr.value = _signalData.value.sinr
         pollingFast = true
         // Saat offline, loop reconnect yang mengatur polling; jangan dimulai ganda
@@ -363,14 +361,28 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
         _showBandDialog.value = false
     }
 
-    fun selectBand(band: BandOption) {
-        _selectedBand.value = band
-        _showBandDialog.value = false
+    /** Pilih mode Auto (semua band). Dialog tetap terbuka. */
+    fun selectAutoBand() = applyBandSelection(BandSelection.AUTO)
 
-        viewModelScope.launch {
-            modemService.executeBandLock(_gatewayIp.value, band, _isDemoMode.value)
-            delay(1000)
-            fetchDataOnce()
+    /** Saklar satu band on/off tanpa konfirmasi. Minimal satu band harus tetap menyala. */
+    fun toggleBand(id: String) {
+        val next = _selectedBand.value.toggled(id)
+        if (next.ids.isEmpty()) return
+        applyBandSelection(next)
+    }
+
+    private fun applyBandSelection(selection: BandSelection) {
+        // Tampilan langsung berubah; pengiriman ke modem ditunda sebentar supaya ketukan beruntun digabung
+        _selectedBand.value = selection
+        bandApplyJob?.cancel()
+        bandApplyJob = viewModelScope.launch {
+            delay(400)
+            bandMutex.withLock {
+                modemService.executeBandSelection(_gatewayIp.value, selection, _isDemoMode.value)
+            }
+            delay(800)
+            val real = modemService.detectActiveBand(_gatewayIp.value)
+            _selectedBand.value = real
         }
     }
 
@@ -463,15 +475,6 @@ class ModemViewModel(application: Application) : AndroidViewModel(application) {
 
                     if (_audioBeepEnabled.value && _currentScreen.value == AppScreen.SIGNAL_HUNTER) {
                         beeper.playBeepForSinr(sig.sinr)
-                    }
-                }
-
-                // 1b. Suhu chipset: hanya di halaman Pencari Sinyal, tiap 3 detik, gagal pun tidak memengaruhi koneksi
-                if (_currentScreen.value == AppScreen.SIGNAL_HUNTER) {
-                    val nowMs = System.currentTimeMillis()
-                    if (nowMs - lastTempFetchMs >= 3000L) {
-                        lastTempFetchMs = nowMs
-                        _temperatureData.value = modemService.fetchTemperature(ip, demo)
                     }
                 }
 
